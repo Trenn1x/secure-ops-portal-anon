@@ -1,0 +1,19 @@
+<svg width="240" height="240" viewBox="0 0 240 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="shield" x1="30" y1="24" x2="210" y2="216" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#1E293B"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="36" y1="36" x2="204" y2="204" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D5A13C"/>
+      <stop offset="1" stop-color="#8F6621"/>
+    </linearGradient>
+  </defs>
+  <path d="M120 16L206 60V132C206 177 171 212 120 224C69 212 34 177 34 132V60L120 16Z" fill="url(#shield)"/>
+  <path d="M120 30L194 67V131C194 168 165 197 120 209C75 197 46 168 46 131V67L120 30Z" stroke="url(#ring)" stroke-width="8"/>
+  <circle cx="120" cy="118" r="54" fill="#0B1324" stroke="#D5A13C" stroke-width="6"/>
+  <path d="M92 111V135H148V111" stroke="#D5A13C" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M92 111C92 95 104 83 120 83C136 83 148 95 148 111" stroke="#D5A13C" stroke-width="10" stroke-linecap="round"/>
+  <rect x="102" y="121" width="36" height="30" rx="8" fill="#D5A13C"/>
+  <text x="120" y="188" text-anchor="middle" fill="#D5A13C" font-family="Arial, sans-serif" font-weight="700" font-size="18">SOP</text>
+</svg>

@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Secure Ops Portal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com?plugins=forms,typography"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              ops: {
+                ink: "#0F172A",
+                steel: "#1E293B",
+                cloud: "#F8FAFC",
+                mist: "#E2E8F0",
+                gold: "#B98A2F",
+                golddeep: "#8F6621"
+              }
+            },
+            fontFamily: {
+              sans: ["IBM Plex Sans", "ui-sans-serif", "system-ui", "sans-serif"],
+              display: ["Space Grotesk", "ui-sans-serif", "system-ui", "sans-serif"]
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      :root {
+        --ops-panel-border: rgba(203, 213, 225, 0.78);
+        --ops-panel-shadow: 0 16px 36px -28px rgba(15, 23, 42, 0.62);
+      }
+      .app-bg {
+        background-image:
+          radial-gradient(circle at 5% 2%, rgba(185, 138, 47, 0.16), transparent 33%),
+          radial-gradient(circle at 98% 4%, rgba(30, 41, 59, 0.12), transparent 42%),
+          linear-gradient(168deg, #f8fafc 0%, #eef4fb 52%, #f7f2e6 100%);
+        background-attachment: fixed;
+      }
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        border-radius: 9999px;
+        border-width: 1px;
+        padding: 0.2rem 0.62rem;
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+      .panel {
+        position: relative;
+        overflow: hidden;
+        border-radius: 1.1rem;
+        border: 1px solid var(--ops-panel-border);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.97), rgba(255, 255, 255, 0.9));
+        box-shadow: var(--ops-panel-shadow);
+        transition: box-shadow 200ms ease, transform 220ms ease;
+      }
+      .panel::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 2px;
+        background: linear-gradient(90deg, rgba(185, 138, 47, 0.56), rgba(30, 41, 59, 0.24));
+        pointer-events: none;
+      }
+      .panel::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: linear-gradient(120deg, rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0));
+      }
+      .panel:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 24px 38px -30px rgba(15, 23, 42, 0.72);
+      }
+      .kicker {
+        font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+        font-size: 0.66rem;
+        font-weight: 700;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: #8f6621;
+      }
+      .section-title {
+        font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #0f172a;
+      }
+      .section-subtitle {
+        margin-top: 0.3rem;
+        font-size: 0.83rem;
+        color: #475569;
+      }
+      .table-shell {
+        margin-top: 0.75rem;
+        overflow-x: auto;
+        border-radius: 0.92rem;
+        border: 1px solid rgba(226, 232, 240, 0.9);
+        background: rgba(255, 255, 255, 0.84);
+      }
+      .table-shell table thead {
+        background: rgba(248, 250, 252, 0.95);
+      }
+      .input-field,
+      .select-field,
+      .textarea-field {
+        margin-top: 0.38rem;
+        display: block;
+        width: 100%;
+        border-radius: 0.68rem;
+        border: 1px solid rgba(203, 213, 225, 0.95);
+        background: rgba(255, 255, 255, 0.96);
+        padding: 0.62rem 0.78rem;
+        font-size: 0.88rem;
+        color: #0f172a;
+      }
+      .input-field::placeholder,
+      .textarea-field::placeholder {
+        color: #94a3b8;
+      }
+      .input-field:focus,
+      .select-field:focus,
+      .textarea-field:focus {
+        outline: none;
+        border-color: rgba(143, 102, 33, 0.8);
+        box-shadow: 0 0 0 3px rgba(185, 138, 47, 0.16);
+      }
+      .btn-primary,
+      .btn-secondary,
+      .btn-accent {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 0.68rem;
+        padding: 0.62rem 0.95rem;
+        font-size: 0.84rem;
+        font-weight: 700;
+        transition: background-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+      }
+      .btn-primary {
+        background: #0f172a;
+        color: #fff;
+      }
+      .btn-primary:hover {
+        background: #1e293b;
+        transform: translateY(-1px);
+      }
+      .btn-secondary {
+        background: #111827;
+        color: #fff;
+      }
+      .btn-secondary:hover {
+        background: #1f2937;
+        transform: translateY(-1px);
+      }
+      .btn-accent {
+        background: #8f6621;
+        color: #fff;
+      }
+      .btn-accent:hover {
+        background: #b98a2f;
+        transform: translateY(-1px);
+      }
+      .muted-note {
+        font-size: 0.8rem;
+        color: #64748b;
+      }
+      .metric-card {
+        padding: 1.05rem;
+      }
+      .metric-label {
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+        color: #64748b;
+      }
+      .metric-value {
+        margin-top: 0.22rem;
+        font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+        font-size: 1.9rem;
+        font-weight: 700;
+        color: #0f172a;
+      }
+      .metric-helper {
+        margin-top: 0.32rem;
+        font-size: 0.76rem;
+        color: #64748b;
+      }
+      .quick-nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.55rem;
+      }
+      .quick-link {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 9999px;
+        border: 1px solid rgba(203, 213, 225, 0.9);
+        background: rgba(255, 255, 255, 0.86);
+        padding: 0.38rem 0.74rem;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        color: #334155;
+        transition: border-color 180ms ease, color 180ms ease, transform 180ms ease;
+      }
+      .quick-link:hover {
+        border-color: rgba(143, 102, 33, 0.5);
+        color: #0f172a;
+        transform: translateY(-1px);
+      }
+      .timeline {
+        position: relative;
+      }
+      .timeline::before {
+        content: "";
+        position: absolute;
+        left: 0.54rem;
+        top: 0.55rem;
+        bottom: 0.55rem;
+        width: 2px;
+        background: linear-gradient(180deg, rgba(185, 138, 47, 0.35), rgba(148, 163, 184, 0.3));
+      }
+      .timeline-item {
+        position: relative;
+        margin-left: 1.4rem;
+      }
+      .timeline-item::before {
+        content: "";
+        position: absolute;
+        left: -1.06rem;
+        top: 0.78rem;
+        width: 0.54rem;
+        height: 0.54rem;
+        border-radius: 9999px;
+        background: #fff;
+        border: 2px solid rgba(185, 138, 47, 0.86);
+      }
+      .reveal {
+        opacity: 0;
+        transform: translateY(10px);
+        transition: opacity 340ms ease, transform 380ms cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      .reveal.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .reveal-delay-1 { transition-delay: 60ms; }
+      .reveal-delay-2 { transition-delay: 120ms; }
+      .active-indicator {
+        animation: activePulse 2s ease-in-out infinite;
+      }
+      @keyframes activePulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        50% { box-shadow: 0 0 0 7px rgba(16, 185, 129, 0.14); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .reveal, .reveal-delay-1, .reveal-delay-2 {
+          opacity: 1;
+          transform: none;
+          transition: none;
+        }
+        .active-indicator { animation: none; }
+      }
+    </style>
+  </head>
+  <body class="app-bg min-h-screen text-slate-900 antialiased">
+    <div class="mx-auto max-w-7xl px-4 pb-10 pt-4 sm:px-6 lg:px-8">
+      <header class="panel sticky top-3 z-30 px-5 py-4 backdrop-blur-sm">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex items-center gap-3">
+            <img src="{{ url_for('static', filename='portal-mark.svg') }}" alt="Operations Provider logo" class="h-12 w-12 rounded-xl border border-ops-gold/40 bg-ops-ink/95 p-1.5">
+            <div>
+              <p class="kicker">Operations Provider</p>
+              <h1 class="font-display text-2xl font-bold text-ops-ink">Secure Ops Portal</h1>
+              <p class="text-sm text-slate-600">Command center for patrol visibility and incident operations.</p>
+            </div>
+          </div>
+          {% if g.user %}
+          <div class="flex items-center gap-2">
+            <div class="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[0.7rem] font-semibold uppercase tracking-wide text-slate-600">
+              {{ g.user.full_name }} · {{ g.user.role }}
+            </div>
+            <form method="post" action="{{ url_for('logout') }}">
+              <button type="submit" class="btn-primary px-3.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-ops-ink/30">
+                Sign out
+              </button>
+            </form>
+          </div>
+          {% endif %}
+        </div>
+      </header>
+
+      <main class="mt-4 space-y-4">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <ul class="space-y-2">
+              {% for category, message in messages %}
+                <li class="rounded-xl border px-3.5 py-2.5 text-sm font-medium
+                  {% if category == 'success' %}border-emerald-200 bg-emerald-50 text-emerald-900
+                  {% elif category == 'error' %}border-rose-200 bg-rose-50 text-rose-900
+                  {% else %}border-amber-200 bg-amber-50 text-amber-900{% endif %}">
+                  {{ message }}
+                </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+
+    <script>
+      (() => {
+        const nodes = Array.from(document.querySelectorAll('.reveal'));
+        if (!nodes.length) return;
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          nodes.forEach((node) => node.classList.add('show'));
+          return;
+        }
+        const observer = new IntersectionObserver(
+          (entries) => {
+            entries.forEach((entry) => {
+              if (entry.isIntersecting) {
+                entry.target.classList.add('show');
+                observer.unobserve(entry.target);
+              }
+            });
+          },
+          { threshold: 0.12 }
+        );
+        nodes.forEach((node) => observer.observe(node));
+      })();
+
+      (() => {
+        const forms = Array.from(document.querySelectorAll("form"));
+        forms.forEach((form) => {
+          form.addEventListener("submit", () => {
+            const submit = form.querySelector("button[type='submit']");
+            if (!submit || submit.dataset.loadingApplied === "1") return;
+            submit.dataset.loadingApplied = "1";
+            submit.dataset.originalLabel = submit.textContent.trim();
+            submit.textContent = "Working...";
+            submit.disabled = true;
+            submit.classList.add("cursor-wait", "opacity-80");
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

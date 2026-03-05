@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: secure-ops-portal
+    env: docker
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: APP_SECRET
+        generateValue: true
+      - key: DATABASE_PATH
+        value: /data/ops_portal.db
+      - key: PORT
+        value: 8000
+    disk:
+      name: ops-portal-data
+      mountPath: /data
+      sizeGB: 1

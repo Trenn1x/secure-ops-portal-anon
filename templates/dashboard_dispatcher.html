@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+{% macro pill(value) -%}
+  {% set key = (value|string)|lower %}
+  {% set extra = '' %}
+  {% if key in ['critical', 'high', 'missed'] %}
+    {% set style = 'border-rose-200 bg-rose-50 text-rose-700' %}
+  {% elif key in ['active', 'resolved', 'patrol', 'medium', 'client'] %}
+    {% set style = 'border-emerald-200 bg-emerald-50 text-emerald-700' %}
+    {% if key == 'active' %}
+      {% set extra = 'active-indicator' %}
+    {% endif %}
+  {% elif key in ['completed', 'closed', 'out'] %}
+    {% set style = 'border-amber-200 bg-amber-50 text-amber-700' %}
+  {% elif key in ['in_review'] %}
+    {% set style = 'border-orange-200 bg-orange-50 text-orange-700' %}
+  {% else %}
+    {% set style = 'border-sky-200 bg-sky-50 text-sky-700' %}
+  {% endif %}
+  <span class="status-pill {{ style }} {{ extra }}">{{ value }}</span>
+{%- endmacro %}
+
+{% block content %}
+<section class="space-y-4">
+  <article class="panel reveal p-6 sm:p-7">
+    <p class="kicker">Dispatcher Workspace</p>
+    <div class="mt-2 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h2 class="font-display text-3xl font-bold text-ops-ink">Operations Dashboard</h2>
+        <p class="section-subtitle">Live guard monitoring, incident control, and client communication in one command view.</p>
+      </div>
+      <span class="status-pill border-ops-gold/35 bg-amber-50 text-ops-golddeep">active board</span>
+    </div>
+  </article>
+
+  <nav class="quick-nav reveal reveal-delay-1">
+    <a href="#patrol-alerts" class="quick-link">Patrol Alerts</a>
+    <a href="#shift-builder" class="quick-link">Create Shift</a>
+    <a href="#incident-queue" class="quick-link">Incident Queue</a>
+    <a href="#assignment-log" class="quick-link">Assignments</a>
+  </nav>
+
+  <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <article class="panel metric-card reveal">
+      <p class="metric-label">Guards Tracked</p>
+      <p class="metric-value">{{ guards|length }}</p>
+      <p class="metric-helper">Personnel visible now</p>
+    </article>
+    <article class="panel metric-card reveal reveal-delay-1">
+      <p class="metric-label">Open Incidents</p>
+      <p class="metric-value">{{ incidents|selectattr('status', 'equalto', 'open')|list|length }}</p>
+      <p class="metric-helper">Awaiting status movement</p>
+    </article>
+    <article class="panel metric-card reveal reveal-delay-2">
+      <p class="metric-label">Active Assignments</p>
+      <p class="metric-value">{{ assignments|selectattr('status', 'equalto', 'active')|list|length }}</p>
+      <p class="metric-helper">Currently in-progress shifts</p>
+    </article>
+    <article class="panel metric-card reveal">
+      <p class="metric-label">Patrol Alerts</p>
+      <p class="metric-value">{{ open_patrol_alerts|length }}</p>
+      <p class="metric-helper">Need dispatcher follow-up</p>
+    </article>
+  </div>
+
+  <article id="patrol-alerts" class="panel reveal p-5">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h2 class="section-title">Patrol Alert Board</h2>
+      <span class="status-pill border-amber-200 bg-amber-50 text-amber-700">threshold {{ alert_threshold_minutes }} min</span>
+    </div>
+    <p class="section-subtitle">Guards with stale check-ins are highlighted for immediate response.</p>
+    <div class="mt-3 space-y-2.5">
+      {% if patrol_alerts %}
+        {% for alert in patrol_alerts %}
+        <div class="rounded-xl border p-3.5 {% if alert.needs_follow_up %}border-amber-200 bg-amber-50/75{% else %}border-slate-200 bg-slate-50/90{% endif %}">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="font-semibold text-slate-900">{{ alert.guard_name }} · {{ alert.site_name }}</p>
+            {% if alert.needs_follow_up %}
+              <span class="status-pill border-amber-200 bg-amber-50 text-amber-700">needs follow-up</span>
+            {% else %}
+              <span class="status-pill border-emerald-200 bg-emerald-50 text-emerald-700">within threshold</span>
+            {% endif %}
+          </div>
+          <p class="mt-1 text-xs text-slate-500">Assignment #{{ alert.assignment_id }} · Last check {{ alert.last_check_type }} at {{ alert.last_check_at }}</p>
+          <p class="mt-1.5 text-sm text-slate-700">{{ alert.alert_reason }}</p>
+          <p class="mt-1 text-sm font-semibold text-slate-800">Stale: {{ alert.stale_minutes }} minute(s)</p>
+          {% if alert.needs_follow_up %}
+          <form method="post" action="{{ url_for('acknowledge_patrol_alert', assignment_id=alert.assignment_id) }}" class="mt-2.5 flex flex-col gap-2 sm:flex-row">
+            <input type="text" name="note" placeholder="Optional acknowledgement note" class="input-field">
+            <button type="submit" class="btn-primary px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ops-ink/30">Acknowledge</button>
+          </form>
+          {% endif %}
+        </div>
+        {% endfor %}
+      {% else %}
+      <p class="text-sm text-slate-500">No active assignments currently. Alerts appear automatically once shifts are marked active.</p>
+      {% endif %}
+    </div>
+  </article>
+
+  <div class="grid gap-3 xl:grid-cols-3">
+    <article id="shift-builder" class="panel reveal p-5">
+      <h2 class="section-title">Create Shift Assignment</h2>
+      <p class="section-subtitle">Assign guard coverage to an existing or new site.</p>
+      <form method="post" action="{{ url_for('create_assignment') }}" class="mt-3 space-y-3">
+        <label class="block text-sm font-semibold text-slate-700">Guard
+          <select name="guard_user_id" required class="select-field">
+            <option value="">Select guard</option>
+            {% for guard in guards_lookup %}
+              <option value="{{ guard.id }}">{{ guard.full_name }} ({{ guard.username }})</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Existing Site
+          <select name="site_id" class="select-field">
+            <option value="">Select site</option>
+            {% for site in sites %}
+              <option value="{{ site.id }}">{{ site.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Or New Site Name
+          <input type="text" name="new_site_name" placeholder="New site" class="input-field">
+        </label>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label class="block text-sm font-semibold text-slate-700">Shift Start
+            <input type="datetime-local" name="shift_start" required class="input-field">
+          </label>
+          <label class="block text-sm font-semibold text-slate-700">Shift End
+            <input type="datetime-local" name="shift_end" required class="input-field">
+          </label>
+        </div>
+        <button type="submit" class="btn-primary w-full focus:outline-none focus:ring-2 focus:ring-ops-ink/30">Create Assignment</button>
+      </form>
+    </article>
+
+    <article class="panel reveal reveal-delay-1 p-5">
+      <h2 class="section-title">Post Update</h2>
+      <p class="section-subtitle">Send structured internal or client-facing communications.</p>
+      <form method="post" action="{{ url_for('post_update') }}" class="mt-3 space-y-3">
+        <label class="block text-sm font-semibold text-slate-700">Site
+          <select name="site_id" required class="select-field">
+            <option value="">Select site</option>
+            {% for site in sites %}
+              <option value="{{ site.id }}">{{ site.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Audience
+          <select name="audience" required class="select-field">
+            <option value="internal">Internal</option>
+            <option value="client">Client</option>
+          </select>
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Message
+          <textarea name="message" rows="5" required placeholder="Status update" class="textarea-field"></textarea>
+        </label>
+        <button type="submit" class="btn-secondary w-full focus:outline-none focus:ring-2 focus:ring-slate-600/30">Post Update</button>
+      </form>
+    </article>
+
+    <article class="panel reveal reveal-delay-2 p-5">
+      <h2 class="section-title">Connecteam Import</h2>
+      <p class="mt-1.5 text-sm text-slate-600">Upload a CSV from Connecteam. Supported columns map automatically.</p>
+      <form method="post" action="{{ url_for('import_connecteam_csv') }}" enctype="multipart/form-data" class="mt-4 space-y-3">
+        <input type="file" name="csv_file" accept=".csv" required class="input-field border-dashed bg-slate-50/85">
+        <button type="submit" class="btn-accent w-full focus:outline-none focus:ring-2 focus:ring-ops-gold/30">Import Shifts</button>
+      </form>
+    </article>
+  </div>
+
+  <div class="grid gap-3 xl:grid-cols-2">
+    <article class="panel reveal p-5">
+      <h2 class="section-title">Guard Live Snapshot</h2>
+      <p class="section-subtitle">Current assignment state and most recent patrol activity.</p>
+      <div class="table-shell">
+        <table class="min-w-full text-left text-sm">
+          <thead class="border-b border-slate-200 text-[0.7rem] uppercase tracking-wider text-slate-500">
+            <tr>
+              <th class="px-3 py-2">Guard</th>
+              <th class="px-3 py-2">Site</th>
+              <th class="px-3 py-2">Status</th>
+              <th class="px-3 py-2">Last Check</th>
+              <th class="px-3 py-2">Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for guard in guards %}
+            <tr class="border-b border-slate-100">
+              <td class="px-3 py-2.5 font-medium text-slate-800">{{ guard.full_name }}</td>
+              <td class="px-3 py-2.5 text-slate-600">{{ guard.site_name }}</td>
+              <td class="px-3 py-2.5">{{ pill(guard.assignment_status) }}</td>
+              <td class="px-3 py-2.5 text-slate-700">{{ guard.last_check_type }}</td>
+              <td class="px-3 py-2.5 text-slate-600">{{ guard.last_check_at or '-' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="px-3 py-3 text-sm text-slate-500">No guards available.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="panel reveal reveal-delay-1 p-5">
+      <h2 class="section-title">Recent Updates</h2>
+      <p class="section-subtitle">Most recent published messages from dispatch.</p>
+      <div class="mt-3 space-y-2">
+        {% for update in updates %}
+        <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="text-sm font-semibold text-slate-800">{{ update.site_name }}</p>
+            {{ pill(update.audience) }}
+          </div>
+          <p class="mt-1 text-sm text-slate-700">{{ update.message }}</p>
+          <p class="mt-1 text-xs text-slate-500">{{ update.author_name }} · {{ update.created_at }}</p>
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-500">No updates posted.</p>
+        {% endfor %}
+      </div>
+    </article>
+  </div>
+
+  <article id="incident-queue" class="panel reveal p-5">
+    <h2 class="section-title">Incident Queue</h2>
+    <p class="section-subtitle">Review and update incident statuses with optional client messaging.</p>
+    <div class="mt-3 space-y-2.5">
+      {% for incident in incidents %}
+      <div class="grid gap-3 rounded-xl border border-slate-200 bg-slate-50/92 p-3.5 lg:grid-cols-[1fr_0.9fr]">
+        <div>
+          <h3 class="font-semibold text-slate-900">#{{ incident.id }} {{ incident.title }}</h3>
+          <p class="mt-0.5 text-sm text-slate-600">{{ incident.site_name }} · reported by {{ incident.guard_name }}</p>
+          <p class="text-xs text-slate-500">{{ incident.created_at }}</p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            {{ pill(incident.severity) }}
+            {{ pill(incident.status) }}
+            {% if incident.client_visible %}
+              <span class="status-pill border-emerald-200 bg-emerald-50 text-emerald-700">client visible</span>
+            {% else %}
+              <span class="status-pill border-slate-200 bg-slate-100 text-slate-600">internal only</span>
+            {% endif %}
+          </div>
+        </div>
+        <form method="post" action="{{ url_for('update_incident_status', incident_id=incident.id) }}" class="space-y-2">
+          <label class="block text-sm font-semibold text-slate-700">Status
+            <select name="status" required class="select-field">
+              {% for status in statuses %}
+              <option value="{{ status }}" {% if status == incident.status %}selected{% endif %}>{{ status }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" name="client_visible" class="rounded border-slate-300 text-ops-golddeep focus:ring-ops-golddeep" {% if incident.client_visible %}checked{% endif %}>
+            Client visible
+          </label>
+          <label class="block text-sm font-semibold text-slate-700">Optional client message
+            <input type="text" name="client_message" placeholder="Explain status change" class="input-field">
+          </label>
+          <button type="submit" class="btn-secondary w-full focus:outline-none focus:ring-2 focus:ring-slate-600/30">Update Incident</button>
+        </form>
+      </div>
+      {% else %}
+      <p class="text-sm text-slate-500">No incidents reported.</p>
+      {% endfor %}
+    </div>
+  </article>
+
+  <article id="assignment-log" class="panel reveal p-5">
+    <h2 class="section-title">Recent Assignments</h2>
+    <p class="section-subtitle">Latest shift schedule with guard and site mapping.</p>
+    <div class="table-shell">
+      <table class="min-w-full text-left text-sm">
+        <thead class="border-b border-slate-200 text-[0.7rem] uppercase tracking-wider text-slate-500">
+          <tr>
+            <th class="px-3 py-2">Guard</th>
+            <th class="px-3 py-2">Site</th>
+            <th class="px-3 py-2">Start</th>
+            <th class="px-3 py-2">End</th>
+            <th class="px-3 py-2">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for assignment in assignments %}
+          <tr class="border-b border-slate-100">
+            <td class="px-3 py-2.5 font-medium text-slate-800">{{ assignment.guard_name }}</td>
+            <td class="px-3 py-2.5 text-slate-600">{{ assignment.site_name }}</td>
+            <td class="px-3 py-2.5 text-slate-600">{{ assignment.shift_start }}</td>
+            <td class="px-3 py-2.5 text-slate-600">{{ assignment.shift_end }}</td>
+            <td class="px-3 py-2.5">{{ pill(assignment.status) }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="px-3 py-3 text-sm text-slate-500">No assignments yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </article>
+</section>
+{% endblock %}

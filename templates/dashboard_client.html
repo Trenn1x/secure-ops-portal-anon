@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% macro pill(value) -%}
+  {% set key = (value|string)|lower %}
+  {% set extra = '' %}
+  {% if key in ['critical', 'high', 'missed'] %}
+    {% set style = 'border-rose-200 bg-rose-50 text-rose-700' %}
+  {% elif key in ['active', 'resolved', 'patrol', 'medium'] %}
+    {% set style = 'border-emerald-200 bg-emerald-50 text-emerald-700' %}
+    {% if key == 'active' %}
+      {% set extra = 'active-indicator' %}
+    {% endif %}
+  {% elif key in ['completed', 'closed', 'out'] %}
+    {% set style = 'border-amber-200 bg-amber-50 text-amber-700' %}
+  {% elif key in ['in_review'] %}
+    {% set style = 'border-orange-200 bg-orange-50 text-orange-700' %}
+  {% else %}
+    {% set style = 'border-sky-200 bg-sky-50 text-sky-700' %}
+  {% endif %}
+  <span class="status-pill {{ style }} {{ extra }}">{{ value }}</span>
+{%- endmacro %}
+
+{% block content %}
+{% if not site %}
+<article class="panel reveal p-6">
+  <p class="kicker">Client Portal</p>
+  <h2 class="mt-2 font-display text-2xl font-bold text-ops-ink">No Site Linked</h2>
+  <p class="section-subtitle">Your client account is not linked to a site yet. Contact operations desk to connect this portal.</p>
+</article>
+{% else %}
+<section class="space-y-4">
+  <article class="panel reveal p-6 sm:p-7">
+    <p class="kicker">Client Visibility Portal</p>
+    <h2 class="mt-2 font-display text-3xl font-bold text-ops-ink">{{ site.name }}</h2>
+    <p class="section-subtitle">A focused stream of incident updates and verified operational status.</p>
+    <div class="mt-4 grid gap-2 sm:grid-cols-2">
+      <div class="rounded-xl border border-slate-200 bg-white/88 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Published Updates</p>
+        <p class="mt-1 font-display text-2xl font-bold text-ops-ink">{{ updates|length }}</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-white/88 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Visible Incidents</p>
+        <p class="mt-1 font-display text-2xl font-bold text-ops-ink">{{ incidents|length }}</p>
+      </div>
+    </div>
+    <div class="mt-4 flex flex-wrap items-center gap-2.5">
+      <a href="{{ url_for('download_client_site_package') }}" class="btn-accent">Download Client Report (.zip)</a>
+      <p class="muted-note">Includes summary, client updates, and incident register CSV files.</p>
+    </div>
+  </article>
+
+  <nav class="quick-nav reveal reveal-delay-1">
+    <a href="#status-feed" class="quick-link">Status Feed</a>
+    <a href="#incident-visibility" class="quick-link">Incident Visibility</a>
+  </nav>
+
+  <div class="grid gap-3 lg:grid-cols-2">
+    <article id="status-feed" class="panel reveal p-5">
+      <h3 class="section-title">Client Status Feed</h3>
+      <p class="section-subtitle">Messages intentionally shared by operations.</p>
+      <div class="timeline mt-3 space-y-2.5">
+        {% for update in updates %}
+        <div class="timeline-item rounded-xl border border-slate-200 bg-slate-50/92 p-3">
+          <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">{{ update.created_at }}</p>
+          <p class="mt-1 text-sm text-slate-700">{{ update.message }}</p>
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-500">No client updates yet.</p>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article id="incident-visibility" class="panel reveal reveal-delay-1 p-5">
+      <h3 class="section-title">Incident Visibility</h3>
+      <p class="section-subtitle">Client-approved incidents with latest severity and state.</p>
+      <div class="mt-3 space-y-2">
+        {% for incident in incidents %}
+        <div class="rounded-xl border border-slate-200 bg-slate-50/92 p-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="font-semibold text-slate-800">{{ incident.title }}</p>
+            <div class="flex flex-wrap items-center gap-2">
+              {{ pill(incident.severity) }}
+              {{ pill(incident.status) }}
+            </div>
+          </div>
+          <p class="mt-1 text-xs text-slate-500">Created {{ incident.created_at }} · Updated {{ incident.updated_at }}</p>
+          <p class="mt-1.5 text-sm text-slate-700">{{ incident.details }}</p>
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-500">No incidents shared with client.</p>
+        {% endfor %}
+      </div>
+    </article>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

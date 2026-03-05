@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="mx-auto grid max-w-5xl gap-4 lg:grid-cols-[1.24fr_0.76fr]">
+  <article class="panel reveal p-7 sm:p-8">
+    <p class="kicker">Operations Access</p>
+    <h2 class="mt-1 font-display text-3xl font-bold text-ops-ink">Sign in</h2>
+    <p class="section-subtitle">Unified command surface for dispatchers, guards, and client viewers.</p>
+
+    <div class="mt-5 grid gap-2 sm:grid-cols-3">
+      <div class="rounded-xl border border-slate-200/85 bg-white/80 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Shift Control</p>
+        <p class="mt-1 text-sm font-semibold text-slate-800">Assignments + status</p>
+      </div>
+      <div class="rounded-xl border border-slate-200/85 bg-white/80 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Patrol Safety</p>
+        <p class="mt-1 text-sm font-semibold text-slate-800">Check-ins + alerts</p>
+      </div>
+      <div class="rounded-xl border border-slate-200/85 bg-white/80 p-3">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Client View</p>
+        <p class="mt-1 text-sm font-semibold text-slate-800">Visibility without noise</p>
+      </div>
+    </div>
+
+    <form method="post" class="mt-6 space-y-4">
+      <label class="block text-sm font-semibold text-slate-700">
+        Username
+        <input name="username" type="text" required autocomplete="username" class="input-field">
+      </label>
+      <label class="block text-sm font-semibold text-slate-700">
+        Password
+        <input name="password" type="password" required autocomplete="current-password" class="input-field">
+      </label>
+      <button type="submit" class="btn-primary w-full focus:outline-none focus:ring-2 focus:ring-ops-ink/30">Access Dashboard</button>
+    </form>
+  </article>
+
+  <aside class="panel reveal reveal-delay-1 p-6">
+    <div class="flex items-center gap-3">
+      <img src="{{ url_for('static', filename='portal-mark.svg') }}" alt="Operations Provider mark" class="h-9 w-9 rounded-lg border border-ops-gold/35 bg-ops-ink p-1">
+      <p class="kicker">Demo Accounts</p>
+    </div>
+    <p class="muted-note mt-3">Use these temporary credentials to preview each role experience.</p>
+    <div class="mt-4 space-y-2.5 text-sm">
+      <div class="rounded-xl border border-slate-200 bg-slate-50/95 p-3">
+        <p class="font-semibold text-slate-800">Dispatcher</p>
+        <p class="mt-0.5 font-mono text-xs text-slate-600">dispatcher / ops123!</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/95 p-3">
+        <p class="font-semibold text-slate-800">Guard</p>
+        <p class="mt-0.5 font-mono text-xs text-slate-600">guard.alpha / ops123!</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/95 p-3">
+        <p class="font-semibold text-slate-800">Client</p>
+        <p class="mt-0.5 font-mono text-xs text-slate-600">client.portal / ops123!</p>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}

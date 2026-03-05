@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% macro pill(value) -%}
+  {% set key = (value|string)|lower %}
+  {% set extra = '' %}
+  {% if key in ['critical', 'high', 'missed'] %}
+    {% set style = 'border-rose-200 bg-rose-50 text-rose-700' %}
+  {% elif key in ['active', 'resolved', 'patrol', 'medium'] %}
+    {% set style = 'border-emerald-200 bg-emerald-50 text-emerald-700' %}
+    {% if key == 'active' %}
+      {% set extra = 'active-indicator' %}
+    {% endif %}
+  {% elif key in ['completed', 'closed', 'out'] %}
+    {% set style = 'border-amber-200 bg-amber-50 text-amber-700' %}
+  {% elif key in ['in_review'] %}
+    {% set style = 'border-orange-200 bg-orange-50 text-orange-700' %}
+  {% else %}
+    {% set style = 'border-sky-200 bg-sky-50 text-sky-700' %}
+  {% endif %}
+  <span class="status-pill {{ style }} {{ extra }}">{{ value }}</span>
+{%- endmacro %}
+
+{% block content %}
+<section class="space-y-4">
+  <article class="panel reveal p-6 sm:p-7">
+    <p class="kicker">Guard Workspace</p>
+    <h2 class="mt-2 font-display text-3xl font-bold text-ops-ink">Field Operations</h2>
+    <p class="section-subtitle">Log patrol activity quickly, report incidents, and track assignment status in real time.</p>
+  </article>
+
+  <nav class="quick-nav reveal reveal-delay-1">
+    <a href="#checkin-form" class="quick-link">Log Check-In</a>
+    <a href="#incident-form" class="quick-link">Report Incident</a>
+    <a href="#my-assignments" class="quick-link">Assignments</a>
+    <a href="#my-incidents" class="quick-link">My Incidents</a>
+  </nav>
+
+  <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+    <article class="panel metric-card reveal">
+      <p class="metric-label">Open Assignments</p>
+      <p class="metric-value">{{ open_assignments|length }}</p>
+      <p class="metric-helper">Ready for patrol action</p>
+    </article>
+    <article class="panel metric-card reveal reveal-delay-1">
+      <p class="metric-label">Recent Check-Ins</p>
+      <p class="metric-value">{{ checkins|length }}</p>
+      <p class="metric-helper">Latest patrol logs</p>
+    </article>
+    <article class="panel metric-card reveal reveal-delay-2">
+      <p class="metric-label">My Incidents</p>
+      <p class="metric-value">{{ incidents|length }}</p>
+      <p class="metric-helper">Submitted to dispatch</p>
+    </article>
+  </div>
+
+  <div class="grid gap-3 xl:grid-cols-2">
+    <article id="checkin-form" class="panel reveal p-5">
+      <h2 class="section-title">Log Check-In</h2>
+      <p class="section-subtitle">Capture patrol milestones to keep dispatch visibility current.</p>
+      <form method="post" action="{{ url_for('guard_checkin') }}" class="mt-3 space-y-3">
+        <label class="block text-sm font-semibold text-slate-700">Assignment
+          <select name="assignment_id" required class="select-field">
+            <option value="">Select assignment</option>
+            {% for assignment in open_assignments %}
+              <option value="{{ assignment.id }}">#{{ assignment.id }} {{ assignment.site_name }} ({{ assignment.status }})</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Type
+          <select name="check_type" required class="select-field">
+            {% for checkin_type in checkin_types %}
+              <option value="{{ checkin_type }}">{{ checkin_type }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Note
+          <input type="text" name="note" placeholder="Optional patrol note" class="input-field">
+        </label>
+        <button type="submit" class="btn-primary w-full focus:outline-none focus:ring-2 focus:ring-ops-ink/30">Submit Check-In</button>
+      </form>
+    </article>
+
+    <article id="incident-form" class="panel reveal reveal-delay-1 p-5">
+      <h2 class="section-title">Report Incident</h2>
+      <p class="section-subtitle">Send clear details to dispatch and choose client visibility.</p>
+      <form method="post" action="{{ url_for('create_incident') }}" class="mt-3 space-y-3">
+        <label class="block text-sm font-semibold text-slate-700">Assignment
+          <select name="assignment_id" required class="select-field">
+            <option value="">Select assignment</option>
+            {% for assignment in open_assignments %}
+              <option value="{{ assignment.id }}">#{{ assignment.id }} {{ assignment.site_name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Severity
+          <select name="severity" required class="select-field">
+            {% for severity in severities %}
+              <option value="{{ severity }}">{{ severity }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Title
+          <input type="text" name="title" required placeholder="Short incident title" class="input-field">
+        </label>
+        <label class="block text-sm font-semibold text-slate-700">Details
+          <textarea name="details" rows="4" required placeholder="What happened, what was done" class="textarea-field"></textarea>
+        </label>
+        <label class="flex items-center gap-2 text-sm text-slate-700">
+          <input type="checkbox" name="client_visible" checked class="rounded border-slate-300 text-ops-golddeep focus:ring-ops-golddeep">
+          Share with client portal
+        </label>
+        <button type="submit" class="btn-secondary w-full focus:outline-none focus:ring-2 focus:ring-slate-600/30">Send to Dispatch</button>
+      </form>
+    </article>
+  </div>
+
+  <article id="my-assignments" class="panel reveal p-5">
+    <h2 class="section-title">My Assignments</h2>
+    <p class="section-subtitle">Upcoming and active shifts linked to your profile.</p>
+    <div class="table-shell">
+      <table class="min-w-full text-left text-sm">
+        <thead class="border-b border-slate-200 text-[0.7rem] uppercase tracking-wider text-slate-500">
+          <tr>
+            <th class="px-3 py-2">Assignment</th>
+            <th class="px-3 py-2">Site</th>
+            <th class="px-3 py-2">Start</th>
+            <th class="px-3 py-2">End</th>
+            <th class="px-3 py-2">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for assignment in assignments %}
+          <tr class="border-b border-slate-100">
+            <td class="px-3 py-2.5 font-medium text-slate-800">#{{ assignment.id }}</td>
+            <td class="px-3 py-2.5 text-slate-600">{{ assignment.site_name }}</td>
+            <td class="px-3 py-2.5 text-slate-600">{{ assignment.shift_start }}</td>
+            <td class="px-3 py-2.5 text-slate-600">{{ assignment.shift_end }}</td>
+            <td class="px-3 py-2.5">{{ pill(assignment.status) }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="px-3 py-3 text-sm text-slate-500">No assignments available.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </article>
+
+  <div class="grid gap-3 xl:grid-cols-2">
+    <article class="panel reveal p-5">
+      <h2 class="section-title">Recent Check-Ins</h2>
+      <div class="mt-3 space-y-2">
+        {% for check in checkins %}
+        <div class="rounded-xl border border-slate-200 bg-slate-50/92 p-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="font-semibold text-slate-800">{{ check.site_name }}</p>
+            {{ pill(check.check_type) }}
+          </div>
+          <p class="mt-1 text-xs text-slate-500">{{ check.created_at }}</p>
+          {% if check.note %}
+          <p class="mt-1 text-sm text-slate-700">{{ check.note }}</p>
+          {% endif %}
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-500">No check-ins yet.</p>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article id="my-incidents" class="panel reveal reveal-delay-1 p-5">
+      <h2 class="section-title">My Incidents</h2>
+      <div class="mt-3 space-y-2">
+        {% for incident in incidents %}
+        <div class="rounded-xl border border-slate-200 bg-slate-50/92 p-3">
+          <p class="font-semibold text-slate-800">{{ incident.title }}</p>
+          <p class="text-sm text-slate-600">{{ incident.site_name }}</p>
+          <p class="text-xs text-slate-500">{{ incident.created_at }}</p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            {{ pill(incident.severity) }}
+            {{ pill(incident.status) }}
+          </div>
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-500">No incidents submitted.</p>
+        {% endfor %}
+      </div>
+    </article>
+  </div>
+</section>
+{% endblock %}
