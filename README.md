@@ -122,8 +122,18 @@ Import accepts common column names and auto-maps these fields:
 - Site: `site`, `site name`, `location`, `job site`
 - Guard: `guard username`, `username`, `employee`, `employee name`
 - Start/End: `shift start` + `shift end` (or common variants)
+- External Shift ID: `shift id`, `shift_id`, `timesheet id`
+- External Job ID: `job id`, `job code`, `position id`
 
-Rows with missing required values or unknown guards are skipped.
+Integration-ready behavior:
+
+- Use `shift id` to make imports idempotent (re-import updates existing scheduled rows instead of duplicating).
+- Active/completed rows are protected from overwrite.
+- Invalid rows are skipped with reason breakdown in dispatcher flash messages.
+- Raw source row payload is stored in `assignments.source_payload` for audit.
+- `assignments.source_system` marks `connecteam` vs `manual`.
+
+Rows with missing required values, invalid datetime windows, or unknown guards are skipped.
 
 ## API endpoints
 
@@ -131,6 +141,7 @@ Rows with missing required values or unknown guards are skipped.
 - `GET /client/exports/site-package` (client session required): downloadable `.zip` with `summary.txt`, `client_updates.csv`, and `incident_visibility.csv`.
 - `GET /dispatcher/exports/operations-brief` (dispatcher session required): downloadable `.zip` with `summary.txt`, `action_queue.csv`, `patrol_alerts.csv`, `incidents_watchlist.csv`, `incident_sla_radar.csv`, and `guard_activity.csv`.
 - `GET /dispatcher/exports/shift-handoff` (dispatcher session required): downloadable `.zip` with `summary.txt`, `shift_coverage.csv`, `incident_followups.csv`, `patrol_followups.csv`, and `internal_updates.csv`.
+- `GET /dispatcher/connecteam/template` (dispatcher session required): downloadable CSV template for Connecteam-compatible imports.
 - `POST /dispatcher/incidents/<incident_id>/ack` (dispatcher session required): records internal dispatcher acknowledgement note and resets acknowledgment SLA timer.
 
 ## Alerting behavior

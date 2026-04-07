@@ -81,6 +81,70 @@ def test_dispatcher_can_import_connecteam_csv(client):
     assert b"Connecteam import complete" in response.data
 
 
+def test_dispatcher_can_download_connecteam_template(client):
+    web, _ = client
+    login(web, "dispatcher", "ops123!")
+
+    response = web.get("/dispatcher/connecteam/template", follow_redirects=False)
+    assert response.status_code == 200
+    assert response.headers["Content-Type"].startswith("text/csv")
+    assert "attachment;" in response.headers.get("Content-Disposition", "")
+
+    text = response.data.decode("utf-8")
+    assert "shift id,site,guard username,shift start,shift end,job id,notes" in text
+    assert "ct-shift-10001" in text
+
+
+def test_connecteam_import_is_idempotent_by_external_shift_id(client):
+    web, db_path = client
+    login(web, "dispatcher", "ops123!")
+
+    first_csv = (
+        "shift id,site,guard username,shift start,shift end,job id\n"
+        "ct-shift-777,Client Site A,guard.alpha,2026-04-09T10:00:00Z,2026-04-09T16:00:00Z,ct-job-22\n"
+    )
+    second_csv = (
+        "shift id,site,guard username,shift start,shift end,job id\n"
+        "ct-shift-777,Client Site A,guard.alpha,2026-04-09T10:00:00Z,2026-04-09T18:00:00Z,ct-job-22\n"
+    )
+
+    first = web.post(
+        "/dispatcher/connecteam/import",
+        data={"csv_file": (io.BytesIO(first_csv.encode("utf-8")), "shifts.csv")},
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert first.status_code == 200
+    assert b"1 created" in first.data
+
+    second = web.post(
+        "/dispatcher/connecteam/import",
+        data={"csv_file": (io.BytesIO(second_csv.encode("utf-8")), "shifts.csv")},
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert second.status_code == 200
+    assert b"1 updated" in second.data
+
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM assignments WHERE external_shift_id = 'ct-shift-777'"
+        ).fetchone()[0]
+        row = conn.execute(
+            """
+            SELECT shift_end, source_system
+            FROM assignments
+            WHERE external_shift_id = 'ct-shift-777'
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert count == 1
+    assert row is not None
+    assert "18:00:00Z" in row[0]
+    assert row[1] == "connecteam"
+
+
 def test_dispatcher_patrol_alert_workflow(client):
     web, db_path = client
     login(web, "dispatcher", "ops123!")

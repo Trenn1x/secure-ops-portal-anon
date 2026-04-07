@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import os
 import re
 import sqlite3
@@ -28,6 +29,7 @@ ALLOWED_CHECKIN_TYPES = {"IN", "PATROL", "OUT"}
 DEFAULT_CHECKIN_ALERT_MINUTES = 60
 DEFAULT_OPERATIONS_BRIEF_LOOKBACK_HOURS = 24
 DEFAULT_SHIFT_HANDOFF_LOOKAHEAD_HOURS = 12
+CONNECTEAM_SOURCE_SYSTEM = "connecteam"
 INCIDENT_SLA_WARNING_WINDOW_MINUTES = 10
 INCIDENT_SLA_TARGET_MINUTES = {
     "critical": 15,
@@ -95,6 +97,34 @@ def incident_sla_state(minutes_to_breach: int) -> str:
     if minutes_to_breach <= INCIDENT_SLA_WARNING_WINDOW_MINUTES:
         return "due_soon"
     return "on_track"
+
+
+def parse_shift_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+
+    parsed = parse_iso_to_utc(cleaned)
+    if parsed is not None:
+        return parsed
+
+    common_formats = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %I:%M %p",
+        "%m/%d/%Y %H:%M:%S",
+    ]
+    for fmt in common_formats:
+        try:
+            parsed_local = datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+        return parsed_local.replace(tzinfo=timezone.utc)
+
+    return None
 
 
 def normalize_header(value: str) -> str:
@@ -211,11 +241,15 @@ def init_db(database_value: str, backend: str) -> None:
                     shift_start TEXT NOT NULL,
                     shift_end TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'scheduled' CHECK(status IN ('scheduled', 'active', 'completed', 'missed')),
+                    source_system TEXT NOT NULL DEFAULT 'manual',
+                    external_shift_id TEXT,
+                    external_job_id TEXT,
+                    source_payload TEXT,
+                    imported_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(site_id) REFERENCES sites(id),
                     FOREIGN KEY(guard_user_id) REFERENCES users(id)
                 );
-
                 CREATE TABLE IF NOT EXISTS checkins (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     assignment_id INTEGER NOT NULL,
@@ -293,6 +327,11 @@ def init_db(database_value: str, backend: str) -> None:
                 shift_start TEXT NOT NULL,
                 shift_end TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'scheduled' CHECK(status IN ('scheduled', 'active', 'completed', 'missed')),
+                source_system TEXT NOT NULL DEFAULT 'manual',
+                external_shift_id TEXT,
+                external_job_id TEXT,
+                source_payload TEXT,
+                imported_at TEXT,
                 created_at TEXT NOT NULL
             )
             """
@@ -337,6 +376,58 @@ def init_db(database_value: str, backend: str) -> None:
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
+            """
+        )
+        db.commit()
+
+
+def upgrade_schema(database_value: str, backend: str) -> None:
+    assignment_extra_columns = {
+        "source_system": "TEXT NOT NULL DEFAULT 'manual'",
+        "external_shift_id": "TEXT",
+        "external_job_id": "TEXT",
+        "source_payload": "TEXT",
+        "imported_at": "TEXT",
+    }
+
+    if backend == "sqlite":
+        with sqlite3.connect(database_value) as conn:
+            existing_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(assignments)").fetchall()
+            }
+            for column_name, column_spec in assignment_extra_columns.items():
+                if column_name not in existing_columns:
+                    conn.execute(
+                        f"ALTER TABLE assignments ADD COLUMN {column_name} {column_spec}"
+                    )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_external_shift
+                ON assignments(external_shift_id)
+                WHERE external_shift_id IS NOT NULL
+                """
+            )
+            conn.commit()
+        return
+
+    with open_raw_connection(database_value, backend) as conn:
+        db = DbConnection(conn, backend)
+        existing_columns_rows = db.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'assignments'
+            """
+        ).fetchall()
+        existing_columns = {row["column_name"] for row in existing_columns_rows}
+        for column_name, column_spec in assignment_extra_columns.items():
+            if column_name not in existing_columns:
+                db.execute(f"ALTER TABLE assignments ADD COLUMN {column_name} {column_spec}")
+        db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_external_shift
+            ON assignments(external_shift_id)
+            WHERE external_shift_id IS NOT NULL
             """
         )
         db.commit()
@@ -399,8 +490,9 @@ def seed_data(database_value: str, backend: str) -> None:
         end = start + timedelta(hours=8)
         assignment_one_id = db.execute(
             """
-            INSERT INTO assignments (site_id, guard_user_id, shift_start, shift_end, status, created_at)
-            VALUES (?, ?, ?, ?, 'scheduled', ?)
+            INSERT INTO assignments
+                (site_id, guard_user_id, shift_start, shift_end, status, source_system, created_at)
+            VALUES (?, ?, ?, ?, 'scheduled', 'manual', ?)
             RETURNING id
             """,
             (site_id, guard_one_id, to_utc_iso(start), to_utc_iso(end), now),
@@ -408,8 +500,9 @@ def seed_data(database_value: str, backend: str) -> None:
 
         db.execute(
             """
-            INSERT INTO assignments (site_id, guard_user_id, shift_start, shift_end, status, created_at)
-            VALUES (?, ?, ?, ?, 'scheduled', ?)
+            INSERT INTO assignments
+                (site_id, guard_user_id, shift_start, shift_end, status, source_system, created_at)
+            VALUES (?, ?, ?, ?, 'scheduled', 'manual', ?)
             """,
             (
                 site_id,
@@ -493,6 +586,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.config["DB_BACKEND"] = detect_db_backend(app.config["DATABASE"])
 
     init_db(app.config["DATABASE"], app.config["DB_BACKEND"])
+    upgrade_schema(app.config["DATABASE"], app.config["DB_BACKEND"])
     seed_data(app.config["DATABASE"], app.config["DB_BACKEND"])
 
     def get_conn() -> DbConnection:
@@ -1216,6 +1310,8 @@ def create_app(test_config: dict | None = None) -> Flask:
                        a.shift_start,
                        a.shift_end,
                        a.status,
+                       a.source_system,
+                       a.external_shift_id,
                        s.name AS site_name,
                        u.full_name AS guard_name
                 FROM assignments a
@@ -1911,8 +2007,9 @@ def create_app(test_config: dict | None = None) -> Flask:
 
             conn.execute(
                 """
-                INSERT INTO assignments (site_id, guard_user_id, shift_start, shift_end, status, created_at)
-                VALUES (?, ?, ?, ?, 'scheduled', ?)
+                INSERT INTO assignments
+                    (site_id, guard_user_id, shift_start, shift_end, status, source_system, created_at)
+                VALUES (?, ?, ?, ?, 'scheduled', 'manual', ?)
                 """,
                 (
                     site_id_value,
@@ -2080,6 +2177,52 @@ def create_app(test_config: dict | None = None) -> Flask:
         flash("Incident acknowledgement recorded.", "success")
         return redirect(url_for("dashboard"))
 
+    @app.get("/dispatcher/connecteam/template")
+    @roles_required("dispatcher")
+    def download_connecteam_template():
+        template_csv = io.StringIO(newline="")
+        writer = csv.writer(template_csv)
+        writer.writerow(
+            [
+                "shift id",
+                "site",
+                "guard username",
+                "shift start",
+                "shift end",
+                "job id",
+                "notes",
+            ]
+        )
+        writer.writerow(
+            [
+                "ct-shift-10001",
+                "Kiawah River",
+                "guard.alpha",
+                "2026-04-08T08:00:00Z",
+                "2026-04-08T16:00:00Z",
+                "ct-job-501",
+                "Front gate coverage",
+            ]
+        )
+        writer.writerow(
+            [
+                "ct-shift-10002",
+                "The Belmont",
+                "guard.bravo",
+                "2026-04-08T16:00:00Z",
+                "2026-04-09T00:00:00Z",
+                "ct-job-502",
+                "Evening lobby rotation",
+            ]
+        )
+
+        filename = f"connecteam-shift-import-template-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+        response = make_response(template_csv.getvalue())
+        response.headers["Content-Type"] = "text/csv; charset=utf-8"
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.post("/dispatcher/connecteam/import")
     @roles_required("dispatcher")
     def import_connecteam_csv():
@@ -2094,11 +2237,22 @@ def create_app(test_config: dict | None = None) -> Flask:
             flash("CSV header row not found.", "error")
             return redirect(url_for("dashboard"))
 
-        added = 0
+        created = 0
+        updated = 0
         skipped = 0
+        skip_reasons: dict[str, int] = {}
+        skipped_rows_preview: list[str] = []
+        import_now = utc_now_iso()
+
+        def record_skip(reason: str, row_number: int, details: str) -> None:
+            nonlocal skipped
+            skipped += 1
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            if len(skipped_rows_preview) < 5:
+                skipped_rows_preview.append(f"row {row_number}: {details}")
 
         with get_conn() as conn:
-            for row in reader:
+            for row_number, row in enumerate(reader, start=2):
                 site_name = pick_csv_value(
                     row,
                     [
@@ -2141,10 +2295,55 @@ def create_app(test_config: dict | None = None) -> Flask:
                         "clock out",
                     ],
                 )
+                external_shift_id = pick_csv_value(
+                    row,
+                    [
+                        "shift id",
+                        "shift_id",
+                        "id",
+                        "timesheet id",
+                        "timesheet_id",
+                        "schedule id",
+                    ],
+                )
+                external_job_id = pick_csv_value(
+                    row,
+                    [
+                        "job id",
+                        "job_id",
+                        "job code",
+                        "position id",
+                        "task id",
+                    ],
+                )
 
                 if not site_name or not guard_identifier or not shift_start or not shift_end:
-                    skipped += 1
+                    record_skip(
+                        "missing_required_fields",
+                        row_number,
+                        "site/guard/shift start/shift end required",
+                    )
                     continue
+
+                shift_start_dt = parse_shift_timestamp(shift_start)
+                shift_end_dt = parse_shift_timestamp(shift_end)
+                if shift_start_dt is None or shift_end_dt is None:
+                    record_skip(
+                        "invalid_datetime",
+                        row_number,
+                        f"could not parse start '{shift_start}' or end '{shift_end}'",
+                    )
+                    continue
+                if shift_end_dt <= shift_start_dt:
+                    record_skip(
+                        "invalid_shift_window",
+                        row_number,
+                        "shift end must be after shift start",
+                    )
+                    continue
+
+                shift_start_utc = to_utc_iso(shift_start_dt)
+                shift_end_utc = to_utc_iso(shift_end_dt)
 
                 guard = conn.execute(
                     """
@@ -2157,7 +2356,11 @@ def create_app(test_config: dict | None = None) -> Flask:
                     (guard_identifier, guard_identifier),
                 ).fetchone()
                 if guard is None:
-                    skipped += 1
+                    record_skip(
+                        "guard_not_found",
+                        row_number,
+                        f"unknown guard '{guard_identifier}'",
+                    )
                     continue
 
                 site = conn.execute(
@@ -2172,24 +2375,126 @@ def create_app(test_config: dict | None = None) -> Flask:
                 else:
                     site_id = site["id"]
 
+                normalized_payload = {
+                    str(k or ""): (v or "").strip()
+                    for k, v in row.items()
+                }
+                source_payload = json.dumps(normalized_payload, sort_keys=True)
+
+                if external_shift_id:
+                    existing_external = conn.execute(
+                        """
+                        SELECT id, status
+                        FROM assignments
+                        WHERE external_shift_id = ?
+                        LIMIT 1
+                        """,
+                        (external_shift_id,),
+                    ).fetchone()
+                    if existing_external is not None:
+                        if existing_external["status"] in {"active", "completed"}:
+                            record_skip(
+                                "existing_locked_shift",
+                                row_number,
+                                f"external shift {external_shift_id} already active/completed",
+                            )
+                            continue
+                        conn.execute(
+                            """
+                            UPDATE assignments
+                            SET site_id = ?,
+                                guard_user_id = ?,
+                                shift_start = ?,
+                                shift_end = ?,
+                                status = 'scheduled',
+                                source_system = ?,
+                                external_job_id = ?,
+                                source_payload = ?,
+                                imported_at = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                site_id,
+                                guard["id"],
+                                shift_start_utc,
+                                shift_end_utc,
+                                CONNECTEAM_SOURCE_SYSTEM,
+                                external_job_id or None,
+                                source_payload,
+                                import_now,
+                                existing_external["id"],
+                            ),
+                        )
+                        updated += 1
+                        continue
+
+                exact_duplicate = conn.execute(
+                    """
+                    SELECT id
+                    FROM assignments
+                    WHERE source_system = ?
+                      AND site_id = ?
+                      AND guard_user_id = ?
+                      AND shift_start = ?
+                      AND shift_end = ?
+                    LIMIT 1
+                    """,
+                    (
+                        CONNECTEAM_SOURCE_SYSTEM,
+                        site_id,
+                        guard["id"],
+                        shift_start_utc,
+                        shift_end_utc,
+                    ),
+                ).fetchone()
+                if exact_duplicate is not None:
+                    record_skip(
+                        "duplicate_shift_window",
+                        row_number,
+                        "same guard/site/start/end already imported",
+                    )
+                    continue
+
                 conn.execute(
                     """
-                    INSERT INTO assignments (site_id, guard_user_id, shift_start, shift_end, status, created_at)
-                    VALUES (?, ?, ?, ?, 'scheduled', ?)
+                    INSERT INTO assignments
+                        (site_id, guard_user_id, shift_start, shift_end, status, source_system, external_shift_id, external_job_id, source_payload, imported_at, created_at)
+                    VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         site_id,
                         guard["id"],
-                        normalize_timestamp(shift_start),
-                        normalize_timestamp(shift_end),
-                        utc_now_iso(),
+                        shift_start_utc,
+                        shift_end_utc,
+                        CONNECTEAM_SOURCE_SYSTEM,
+                        external_shift_id or None,
+                        external_job_id or None,
+                        source_payload,
+                        import_now,
+                        import_now,
                     ),
                 )
-                added += 1
+                created += 1
 
             conn.commit()
 
-        flash(f"Connecteam import complete: {added} shift(s) added, {skipped} skipped.", "success")
+        flash(
+            (
+                "Connecteam import complete: "
+                f"{created} created, {updated} updated, {skipped} skipped."
+            ),
+            "success",
+        )
+        if skip_reasons:
+            reason_text = ", ".join(
+                f"{reason}:{count}" for reason, count in sorted(skip_reasons.items())
+            )
+            flash(f"Skipped reason breakdown: {reason_text}", "warning")
+        if skipped_rows_preview:
+            flash(
+                "Sample skipped rows: " + " | ".join(skipped_rows_preview),
+                "warning",
+            )
         return redirect(url_for("dashboard"))
 
     @app.post("/guard/checkins")
