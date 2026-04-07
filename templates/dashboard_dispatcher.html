@@ -72,10 +72,14 @@
       <a href="{{ url_for('download_dispatcher_operations_brief') }}" class="btn-accent">Download Ops Brief (.zip)</a>
     </div>
 
-    <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+    <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
       <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
         <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Patrol Alerts</p>
         <p class="mt-1 font-display text-xl font-bold text-ops-ink">{{ ops_brief.summary.patrol_alerts }}</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">SLA Breached</p>
+        <p class="mt-1 font-display text-xl font-bold text-rose-700">{{ ops_brief.summary.incidents_sla_breached }}</p>
       </div>
       <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
         <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Incidents ({{ ops_brief.lookback_hours }}h)</p>
@@ -98,7 +102,7 @@
         <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="flex flex-wrap items-center gap-2">
-              <span class="status-pill {% if item.priority == 'P1' %}border-rose-200 bg-rose-50 text-rose-700{% else %}border-amber-200 bg-amber-50 text-amber-700{% endif %}">{{ item.priority }}</span>
+              <span class="status-pill {% if item.priority == 'P1' %}border-rose-200 bg-rose-50 text-rose-700{% elif item.priority == 'P2' %}border-amber-200 bg-amber-50 text-amber-700{% else %}border-sky-200 bg-sky-50 text-sky-700{% endif %}">{{ item.priority }}</span>
               <span class="text-sm font-semibold text-slate-800">{{ item.category }} · {{ item.site_name }}</span>
             </div>
             <p class="text-xs text-slate-500">{{ item.created_at }}</p>
@@ -108,6 +112,30 @@
         </div>
         {% else %}
         <p class="text-sm text-slate-500">No immediate action items detected.</p>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="mt-4">
+      <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-600">Incident SLA Radar</h3>
+      <div class="mt-2 space-y-2">
+        {% for incident in ops_brief.incident_sla_radar[:6] %}
+        <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="text-sm font-semibold text-slate-800">#{{ incident.id }} {{ incident.title }}</p>
+            {% if incident.sla_state == 'breached' %}
+              <span class="status-pill border-rose-200 bg-rose-50 text-rose-700">breached</span>
+            {% elif incident.sla_state == 'due_soon' %}
+              <span class="status-pill border-amber-200 bg-amber-50 text-amber-700">due soon</span>
+            {% else %}
+              <span class="status-pill border-emerald-200 bg-emerald-50 text-emerald-700">on track</span>
+            {% endif %}
+          </div>
+          <p class="mt-1 text-sm text-slate-700">{{ incident.site_name }} · {{ incident.severity }}/{{ incident.status }} · owner {{ incident.guard_name }}</p>
+          <p class="mt-1 text-xs text-slate-500">Last touch {{ incident.last_touch_at }} · target {{ incident.sla_target_minutes }} min · to breach {{ incident.minutes_to_breach }} min</p>
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-500">No open incidents currently tracked for SLA.</p>
         {% endfor %}
       </div>
     </div>

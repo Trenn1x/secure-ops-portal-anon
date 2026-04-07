@@ -18,7 +18,7 @@ A production-ready MVP for Operations Provider to monitor guards in real time, m
 5. Client logs in to view approved incident visibility and status updates.
 6. Dispatcher imports shift CSV exported from Connecteam.
 7. Client downloads a report package (`.zip`) containing summary + CSV exports for incident/update records.
-8. Dispatcher downloads an operations brief package (`.zip`) with priority action queue, patrol alerts, incident watchlist, and guard activity.
+8. Dispatcher downloads an operations brief package (`.zip`) with priority action queue, patrol alerts, incident SLA radar, watchlist, and guard activity.
 
 ## Demo accounts
 
@@ -126,7 +126,7 @@ Rows with missing required values or unknown guards are skipped.
 
 - `GET /api/status` (dispatcher session required): JSON live snapshot for guard status.
 - `GET /client/exports/site-package` (client session required): downloadable `.zip` with `summary.txt`, `client_updates.csv`, and `incident_visibility.csv`.
-- `GET /dispatcher/exports/operations-brief` (dispatcher session required): downloadable `.zip` with `summary.txt`, `action_queue.csv`, `patrol_alerts.csv`, `incidents_watchlist.csv`, and `guard_activity.csv`.
+- `GET /dispatcher/exports/operations-brief` (dispatcher session required): downloadable `.zip` with `summary.txt`, `action_queue.csv`, `patrol_alerts.csv`, `incidents_watchlist.csv`, `incident_sla_radar.csv`, and `guard_activity.csv`.
 
 ## Alerting behavior
 

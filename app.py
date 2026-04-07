@@ -27,6 +27,13 @@ ALLOWED_INCIDENT_SEVERITY = {"low", "medium", "high", "critical"}
 ALLOWED_CHECKIN_TYPES = {"IN", "PATROL", "OUT"}
 DEFAULT_CHECKIN_ALERT_MINUTES = 60
 DEFAULT_OPERATIONS_BRIEF_LOOKBACK_HOURS = 24
+INCIDENT_SLA_WARNING_WINDOW_MINUTES = 10
+INCIDENT_SLA_TARGET_MINUTES = {
+    "critical": 15,
+    "high": 30,
+    "medium": 60,
+    "low": 120,
+}
 
 
 def to_utc_iso(value: datetime) -> str:
@@ -74,6 +81,11 @@ def minutes_since(timestamp: str | None, reference_utc: datetime) -> int | None:
 
 def utc_now_iso() -> str:
     return to_utc_iso(datetime.now(timezone.utc))
+
+
+def incident_sla_target_minutes(severity: str | None) -> int:
+    key = (severity or "").strip().lower()
+    return INCIDENT_SLA_TARGET_MINUTES.get(key, INCIDENT_SLA_TARGET_MINUTES["medium"])
 
 
 def normalize_header(value: str) -> str:
@@ -575,7 +587,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         patrol_alerts = build_patrol_alerts(alert_threshold_minutes, now_utc)
         open_patrol_alerts = [item for item in patrol_alerts if item["needs_follow_up"]]
 
-        incidents_watchlist = fetch_all(
+        incidents_open = fetch_all(
             """
             SELECT i.id,
                    i.title,
@@ -584,13 +596,19 @@ def create_app(test_config: dict | None = None) -> Flask:
                    i.client_visible,
                    i.created_at,
                    i.updated_at,
+                   incident_updates.last_update_at,
                    s.name AS site_name,
                    u.full_name AS guard_name
             FROM incidents i
             JOIN sites s ON s.id = i.site_id
             JOIN users u ON u.id = i.guard_user_id
+            LEFT JOIN (
+                SELECT incident_id, MAX(created_at) AS last_update_at
+                FROM updates
+                WHERE incident_id IS NOT NULL
+                GROUP BY incident_id
+            ) AS incident_updates ON incident_updates.incident_id = i.id
             WHERE i.status IN ('open', 'in_review')
-              AND i.severity IN ('high', 'critical')
             ORDER BY
                 CASE i.severity WHEN 'critical' THEN 2 WHEN 'high' THEN 1 ELSE 0 END DESC,
                 i.created_at ASC
@@ -676,12 +694,87 @@ def create_app(test_config: dict | None = None) -> Flask:
             else:
                 incident_severity_counts["other"] += 1
 
+        incident_sla_counts: dict[str, int] = {"breached": 0, "due_soon": 0, "on_track": 0}
+        incident_sla_radar: list[dict] = []
+        for incident in incidents_open:
+            severity_key = (incident["severity"] or "").lower()
+            sla_target_minutes = incident_sla_target_minutes(severity_key)
+            last_touch_at = (
+                incident["last_update_at"] or incident["updated_at"] or incident["created_at"]
+            )
+            minutes_since_last_touch = minutes_since(last_touch_at, now_utc) or 0
+            incident_age_minutes = minutes_since(incident["created_at"], now_utc) or 0
+            minutes_to_breach = sla_target_minutes - minutes_since_last_touch
+
+            if minutes_to_breach < 0:
+                sla_state = "breached"
+            elif minutes_to_breach <= INCIDENT_SLA_WARNING_WINDOW_MINUTES:
+                sla_state = "due_soon"
+            else:
+                sla_state = "on_track"
+            incident_sla_counts[sla_state] += 1
+
+            incident_sla_radar.append(
+                {
+                    "id": incident["id"],
+                    "title": incident["title"],
+                    "severity": severity_key or "unknown",
+                    "status": incident["status"],
+                    "client_visible": incident["client_visible"],
+                    "created_at": incident["created_at"],
+                    "updated_at": incident["updated_at"],
+                    "last_touch_at": last_touch_at,
+                    "site_name": incident["site_name"],
+                    "guard_name": incident["guard_name"],
+                    "sla_target_minutes": sla_target_minutes,
+                    "minutes_since_last_touch": minutes_since_last_touch,
+                    "minutes_to_breach": minutes_to_breach,
+                    "sla_state": sla_state,
+                    "incident_age_minutes": incident_age_minutes,
+                }
+            )
+
+        incident_sla_radar.sort(
+            key=lambda item: (
+                {"breached": 0, "due_soon": 1, "on_track": 2}.get(item["sla_state"], 9),
+                {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(item["severity"], 9),
+                item["minutes_to_breach"],
+                -item["incident_age_minutes"],
+                item["site_name"],
+            )
+        )
+        incidents_watchlist = [
+            item for item in incident_sla_radar if item["severity"] in {"critical", "high"}
+        ]
+
         action_queue: list[dict] = []
-        for incident in incidents_watchlist:
-            age_minutes = minutes_since(incident["created_at"], now_utc) or 0
-            severity = (incident["severity"] or "").lower()
-            priority_rank = 1 if severity == "critical" else 2
-            priority = "P1" if priority_rank == 1 else "P2"
+        for incident in incident_sla_radar:
+            if incident["sla_state"] == "on_track" and incident["severity"] not in {
+                "critical",
+                "high",
+            }:
+                continue
+
+            if incident["sla_state"] == "breached":
+                priority_rank = 1
+                priority = "P1"
+            elif incident["severity"] == "critical" or incident["sla_state"] == "due_soon":
+                priority_rank = 2
+                priority = "P2"
+            else:
+                priority_rank = 3
+                priority = "P3"
+
+            if incident["minutes_to_breach"] < 0:
+                sla_message = f"SLA breached by {abs(incident['minutes_to_breach'])} min"
+                urgency_score = 5000 + abs(incident["minutes_to_breach"])
+            elif incident["minutes_to_breach"] == 0:
+                sla_message = "SLA due now"
+                urgency_score = 4000
+            else:
+                sla_message = f"{incident['minutes_to_breach']} min to SLA breach"
+                urgency_score = 1000 - incident["minutes_to_breach"]
+
             action_queue.append(
                 {
                     "priority_rank": priority_rank,
@@ -692,9 +785,9 @@ def create_app(test_config: dict | None = None) -> Flask:
                     "created_at": incident["created_at"],
                     "details": (
                         f"#{incident['id']} {incident['title']} "
-                        f"({incident['severity']}/{incident['status']}) open for {age_minutes} min"
+                        f"({incident['severity']}/{incident['status']}) age {incident['incident_age_minutes']} min, {sla_message}"
                     ),
-                    "sort_minutes": age_minutes,
+                    "sort_minutes": urgency_score,
                 }
             )
 
@@ -750,6 +843,8 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "open_incidents": open_incident_count,
                 "active_assignments": active_assignment_count,
                 "patrol_alerts": len(open_patrol_alerts),
+                "incidents_sla_breached": incident_sla_counts["breached"],
+                "incidents_sla_due_soon": incident_sla_counts["due_soon"],
                 "incidents_recent": len(incidents_last_lookback),
                 "checkins_recent": checkins_recent_count,
                 "client_updates_recent": client_updates_recent_count,
@@ -758,7 +853,8 @@ def create_app(test_config: dict | None = None) -> Flask:
             },
             "action_queue": action_queue,
             "guard_activity": guard_activity_rows,
-            "incidents_watchlist": [dict(row) for row in incidents_watchlist],
+            "incidents_watchlist": incidents_watchlist,
+            "incident_sla_radar": incident_sla_radar,
             "patrol_alerts": patrol_alerts,
             "open_patrol_alerts": open_patrol_alerts,
         }
@@ -1209,6 +1305,8 @@ def create_app(test_config: dict | None = None) -> Flask:
             f"Open incidents (open/in_review): {summary['open_incidents']}\n"
             f"Active assignments: {summary['active_assignments']}\n"
             f"Patrol alerts needing follow-up: {summary['patrol_alerts']}\n"
+            f"SLA breached incidents: {summary['incidents_sla_breached']}\n"
+            f"SLA due-soon incidents: {summary['incidents_sla_due_soon']}\n"
             f"Incidents created in lookback: {summary['incidents_recent']}\n"
             f"Critical incidents in lookback: {summary['critical_incidents_recent']}\n"
             f"High incidents in lookback: {summary['high_incidents_recent']}\n"
@@ -1222,7 +1320,8 @@ def create_app(test_config: dict | None = None) -> Flask:
             "- summary.txt: headline metrics and lookback window\n"
             "- action_queue.csv: prioritized dispatcher actions\n"
             "- patrol_alerts.csv: active shift patrol staleness board\n"
-            "- incidents_watchlist.csv: high/critical open or in-review incidents\n"
+            "- incidents_watchlist.csv: high/critical open or in-review incident watchlist\n"
+            "- incident_sla_radar.csv: SLA state for all open/in-review incidents\n"
             "- guard_activity.csv: per-guard latest check-in and recent incident volume\n"
         )
 
@@ -1284,6 +1383,10 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "client_visible",
                 "created_at_utc",
                 "updated_at_utc",
+                "sla_state",
+                "sla_target_minutes",
+                "minutes_since_last_touch",
+                "minutes_to_breach",
             ]
         )
         for incident in brief["incidents_watchlist"]:
@@ -1298,6 +1401,48 @@ def create_app(test_config: dict | None = None) -> Flask:
                     "yes" if incident["client_visible"] else "no",
                     incident["created_at"],
                     incident["updated_at"],
+                    incident["sla_state"],
+                    incident["sla_target_minutes"],
+                    incident["minutes_since_last_touch"],
+                    incident["minutes_to_breach"],
+                ]
+            )
+
+        incident_sla_csv = io.StringIO(newline="")
+        incident_sla_writer = csv.writer(incident_sla_csv)
+        incident_sla_writer.writerow(
+            [
+                "incident_id",
+                "title",
+                "site_name",
+                "guard_name",
+                "severity",
+                "status",
+                "client_visible",
+                "created_at_utc",
+                "last_touch_at_utc",
+                "sla_target_minutes",
+                "minutes_since_last_touch",
+                "minutes_to_breach",
+                "sla_state",
+            ]
+        )
+        for incident in brief["incident_sla_radar"]:
+            incident_sla_writer.writerow(
+                [
+                    incident["id"],
+                    incident["title"],
+                    incident["site_name"],
+                    incident["guard_name"],
+                    incident["severity"],
+                    incident["status"],
+                    "yes" if incident["client_visible"] else "no",
+                    incident["created_at"],
+                    incident["last_touch_at"],
+                    incident["sla_target_minutes"],
+                    incident["minutes_since_last_touch"],
+                    incident["minutes_to_breach"],
+                    incident["sla_state"],
                 ]
             )
 
@@ -1334,6 +1479,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             archive.writestr("action_queue.csv", action_queue_csv.getvalue())
             archive.writestr("patrol_alerts.csv", patrol_alerts_csv.getvalue())
             archive.writestr("incidents_watchlist.csv", incidents_csv.getvalue())
+            archive.writestr("incident_sla_radar.csv", incident_sla_csv.getvalue())
             archive.writestr("guard_activity.csv", guard_activity_csv.getvalue())
 
         archive_buffer.seek(0)

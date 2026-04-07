@@ -161,7 +161,7 @@ def test_dispatcher_can_download_operations_brief_package(client):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old_shift_start = (now - timedelta(hours=4)).isoformat().replace("+00:00", "Z")
     old_patrol_time = (now - timedelta(minutes=130)).isoformat().replace("+00:00", "Z")
-    created_at = now.isoformat().replace("+00:00", "Z")
+    created_at = (now - timedelta(minutes=80)).isoformat().replace("+00:00", "Z")
 
     with sqlite3.connect(db_path) as conn:
         guard_id = conn.execute(
@@ -213,14 +213,19 @@ def test_dispatcher_can_download_operations_brief_package(client):
         "action_queue.csv",
         "patrol_alerts.csv",
         "incidents_watchlist.csv",
+        "incident_sla_radar.csv",
         "guard_activity.csv",
     } <= names
 
     summary_text = archive.read("summary.txt").decode("utf-8")
     action_queue_csv = archive.read("action_queue.csv").decode("utf-8")
     watchlist_csv = archive.read("incidents_watchlist.csv").decode("utf-8")
+    incident_sla_csv = archive.read("incident_sla_radar.csv").decode("utf-8")
 
     assert "Dispatcher Operations Brief" in summary_text
     assert "Patrol alerts needing follow-up" in summary_text
+    assert "SLA breached incidents" in summary_text
     assert "Patrol gap" in action_queue_csv
     assert "Gate forced entry alarm" in watchlist_csv
+    assert "Gate forced entry alarm" in incident_sla_csv
+    assert "breached" in incident_sla_csv
