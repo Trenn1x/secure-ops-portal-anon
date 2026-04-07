@@ -26,6 +26,7 @@ ALLOWED_INCIDENT_STATUS = {"open", "in_review", "resolved", "closed"}
 ALLOWED_INCIDENT_SEVERITY = {"low", "medium", "high", "critical"}
 ALLOWED_CHECKIN_TYPES = {"IN", "PATROL", "OUT"}
 DEFAULT_CHECKIN_ALERT_MINUTES = 60
+DEFAULT_OPERATIONS_BRIEF_LOOKBACK_HOURS = 24
 
 
 def to_utc_iso(value: datetime) -> str:
@@ -451,6 +452,12 @@ def create_app(test_config: dict | None = None) -> Flask:
         CHECKIN_ALERT_MINUTES=int(
             os.getenv("CHECKIN_ALERT_MINUTES", str(DEFAULT_CHECKIN_ALERT_MINUTES))
         ),
+        OPERATIONS_BRIEF_LOOKBACK_HOURS=int(
+            os.getenv(
+                "OPERATIONS_BRIEF_LOOKBACK_HOURS",
+                str(DEFAULT_OPERATIONS_BRIEF_LOOKBACK_HOURS),
+            )
+        ),
     )
 
     if test_config:
@@ -491,6 +498,270 @@ def create_app(test_config: dict | None = None) -> Flask:
             """,
             (client_user_id,),
         )
+
+    def build_patrol_alerts(
+        alert_threshold_minutes: int, now_utc: datetime | None = None
+    ) -> list[dict]:
+        active_guard_assignments = fetch_all(
+            """
+            SELECT a.id,
+                   a.site_id,
+                   a.shift_start,
+                   a.status,
+                   s.name AS site_name,
+                   u.full_name AS guard_name,
+                   last_check.check_type AS last_check_type,
+                   last_check.created_at AS last_check_at
+            FROM assignments a
+            JOIN users u ON u.id = a.guard_user_id
+            JOIN sites s ON s.id = a.site_id
+            LEFT JOIN (
+                SELECT c1.assignment_id, c1.check_type, c1.created_at
+                FROM checkins c1
+                INNER JOIN (
+                    SELECT assignment_id, MAX(id) AS max_id
+                    FROM checkins
+                    GROUP BY assignment_id
+                ) latest_check ON latest_check.max_id = c1.id
+            ) AS last_check ON last_check.assignment_id = a.id
+            WHERE a.status = 'active'
+            ORDER BY a.shift_start ASC
+            LIMIT 80
+            """
+        )
+
+        reference_time = now_utc or datetime.now(timezone.utc)
+        patrol_alerts: list[dict] = []
+        for assignment in active_guard_assignments:
+            last_check_minutes = minutes_since(assignment["last_check_at"], reference_time)
+            shift_start_minutes = minutes_since(assignment["shift_start"], reference_time)
+
+            if last_check_minutes is None:
+                stale_minutes = shift_start_minutes if shift_start_minutes is not None else 0
+                alert_reason = "No check-in logged on this active shift."
+            else:
+                stale_minutes = last_check_minutes
+                alert_reason = f"No patrol update for {stale_minutes} minutes."
+
+            patrol_alerts.append(
+                {
+                    "assignment_id": assignment["id"],
+                    "site_id": assignment["site_id"],
+                    "site_name": assignment["site_name"],
+                    "guard_name": assignment["guard_name"],
+                    "last_check_type": assignment["last_check_type"] or "none",
+                    "last_check_at": assignment["last_check_at"] or "none",
+                    "stale_minutes": stale_minutes,
+                    "needs_follow_up": stale_minutes >= alert_threshold_minutes,
+                    "alert_reason": alert_reason,
+                }
+            )
+
+        patrol_alerts.sort(
+            key=lambda item: (
+                not item["needs_follow_up"],
+                -item["stale_minutes"],
+                item["guard_name"],
+            )
+        )
+        return patrol_alerts
+
+    def build_dispatcher_operations_brief() -> dict:
+        lookback_hours = max(1, int(app.config["OPERATIONS_BRIEF_LOOKBACK_HOURS"]))
+        alert_threshold_minutes = max(1, int(app.config["CHECKIN_ALERT_MINUTES"]))
+        now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+        lookback_start_iso = to_utc_iso(now_utc - timedelta(hours=lookback_hours))
+
+        patrol_alerts = build_patrol_alerts(alert_threshold_minutes, now_utc)
+        open_patrol_alerts = [item for item in patrol_alerts if item["needs_follow_up"]]
+
+        incidents_watchlist = fetch_all(
+            """
+            SELECT i.id,
+                   i.title,
+                   i.severity,
+                   i.status,
+                   i.client_visible,
+                   i.created_at,
+                   i.updated_at,
+                   s.name AS site_name,
+                   u.full_name AS guard_name
+            FROM incidents i
+            JOIN sites s ON s.id = i.site_id
+            JOIN users u ON u.id = i.guard_user_id
+            WHERE i.status IN ('open', 'in_review')
+              AND i.severity IN ('high', 'critical')
+            ORDER BY
+                CASE i.severity WHEN 'critical' THEN 2 WHEN 'high' THEN 1 ELSE 0 END DESC,
+                i.created_at ASC
+            """
+        )
+
+        incidents_last_lookback = fetch_all(
+            """
+            SELECT id, severity
+            FROM incidents
+            WHERE created_at >= ?
+            """,
+            (lookback_start_iso,),
+        )
+
+        guard_activity = fetch_all(
+            """
+            SELECT u.id,
+                   u.full_name,
+                   u.username,
+                   COALESCE(active_assignments.count_active, 0) AS active_assignments,
+                   COALESCE(recent_incidents.count_recent_incidents, 0) AS incidents_recent,
+                   COALESCE(last_check.check_type, 'none') AS last_check_type,
+                   last_check.created_at AS last_check_at
+            FROM users u
+            LEFT JOIN (
+                SELECT guard_user_id, COUNT(*) AS count_active
+                FROM assignments
+                WHERE status = 'active'
+                GROUP BY guard_user_id
+            ) AS active_assignments ON active_assignments.guard_user_id = u.id
+            LEFT JOIN (
+                SELECT guard_user_id, COUNT(*) AS count_recent_incidents
+                FROM incidents
+                WHERE created_at >= ?
+                GROUP BY guard_user_id
+            ) AS recent_incidents ON recent_incidents.guard_user_id = u.id
+            LEFT JOIN (
+                SELECT c1.guard_user_id, c1.check_type, c1.created_at
+                FROM checkins c1
+                INNER JOIN (
+                    SELECT guard_user_id, MAX(id) AS max_id
+                    FROM checkins
+                    GROUP BY guard_user_id
+                ) latest ON latest.max_id = c1.id
+            ) AS last_check ON last_check.guard_user_id = u.id
+            WHERE u.role = 'guard'
+            ORDER BY u.full_name ASC
+            """,
+            (lookback_start_iso,),
+        )
+
+        open_incident_count = fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM incidents
+            WHERE status IN ('open', 'in_review')
+            """
+        )["c"]
+        active_assignment_count = fetch_one(
+            "SELECT COUNT(*) AS c FROM assignments WHERE status = 'active'"
+        )["c"]
+        checkins_recent_count = fetch_one(
+            "SELECT COUNT(*) AS c FROM checkins WHERE created_at >= ?",
+            (lookback_start_iso,),
+        )["c"]
+        client_updates_recent_count = fetch_one(
+            """
+            SELECT COUNT(*) AS c
+            FROM updates
+            WHERE audience = 'client' AND created_at >= ?
+            """,
+            (lookback_start_iso,),
+        )["c"]
+
+        incident_severity_counts: dict[str, int] = {"critical": 0, "high": 0, "other": 0}
+        for row in incidents_last_lookback:
+            severity = (row["severity"] or "").lower()
+            if severity == "critical":
+                incident_severity_counts["critical"] += 1
+            elif severity == "high":
+                incident_severity_counts["high"] += 1
+            else:
+                incident_severity_counts["other"] += 1
+
+        action_queue: list[dict] = []
+        for incident in incidents_watchlist:
+            age_minutes = minutes_since(incident["created_at"], now_utc) or 0
+            severity = (incident["severity"] or "").lower()
+            priority_rank = 1 if severity == "critical" else 2
+            priority = "P1" if priority_rank == 1 else "P2"
+            action_queue.append(
+                {
+                    "priority_rank": priority_rank,
+                    "priority": priority,
+                    "category": "Incident",
+                    "site_name": incident["site_name"],
+                    "owner": incident["guard_name"],
+                    "created_at": incident["created_at"],
+                    "details": (
+                        f"#{incident['id']} {incident['title']} "
+                        f"({incident['severity']}/{incident['status']}) open for {age_minutes} min"
+                    ),
+                    "sort_minutes": age_minutes,
+                }
+            )
+
+        for alert in open_patrol_alerts:
+            priority_rank = 1 if alert["stale_minutes"] >= (alert_threshold_minutes * 2) else 2
+            priority = "P1" if priority_rank == 1 else "P2"
+            action_queue.append(
+                {
+                    "priority_rank": priority_rank,
+                    "priority": priority,
+                    "category": "Patrol gap",
+                    "site_name": alert["site_name"],
+                    "owner": alert["guard_name"],
+                    "created_at": alert["last_check_at"]
+                    if alert["last_check_at"] != "none"
+                    else to_utc_iso(now_utc),
+                    "details": (
+                        f"{alert['alert_reason']} (assignment #{alert['assignment_id']})"
+                    ),
+                    "sort_minutes": alert["stale_minutes"],
+                }
+            )
+
+        action_queue.sort(
+            key=lambda item: (item["priority_rank"], -item["sort_minutes"], item["site_name"])
+        )
+        for item in action_queue:
+            item.pop("sort_minutes", None)
+
+        guard_activity_rows: list[dict] = []
+        for row in guard_activity:
+            last_check_age_minutes = minutes_since(row["last_check_at"], now_utc)
+            guard_activity_rows.append(
+                {
+                    "guard_name": row["full_name"],
+                    "username": row["username"],
+                    "active_assignments": row["active_assignments"],
+                    "incidents_recent": row["incidents_recent"],
+                    "last_check_type": row["last_check_type"] or "none",
+                    "last_check_at": row["last_check_at"] or "none",
+                    "last_check_age_minutes": (
+                        "" if last_check_age_minutes is None else last_check_age_minutes
+                    ),
+                }
+            )
+
+        return {
+            "generated_at": to_utc_iso(now_utc),
+            "lookback_hours": lookback_hours,
+            "lookback_start": lookback_start_iso,
+            "alert_threshold_minutes": alert_threshold_minutes,
+            "summary": {
+                "open_incidents": open_incident_count,
+                "active_assignments": active_assignment_count,
+                "patrol_alerts": len(open_patrol_alerts),
+                "incidents_recent": len(incidents_last_lookback),
+                "checkins_recent": checkins_recent_count,
+                "client_updates_recent": client_updates_recent_count,
+                "critical_incidents_recent": incident_severity_counts["critical"],
+                "high_incidents_recent": incident_severity_counts["high"],
+            },
+            "action_queue": action_queue,
+            "guard_activity": guard_activity_rows,
+            "incidents_watchlist": [dict(row) for row in incidents_watchlist],
+            "patrol_alerts": patrol_alerts,
+            "open_patrol_alerts": open_patrol_alerts,
+        }
 
     def login_required(view):
         @wraps(view)
@@ -675,70 +946,10 @@ def create_app(test_config: dict | None = None) -> Flask:
                 """
             )
 
-            active_guard_assignments = fetch_all(
-                """
-                SELECT a.id,
-                       a.site_id,
-                       a.shift_start,
-                       a.status,
-                       s.name AS site_name,
-                       u.full_name AS guard_name,
-                       last_check.check_type AS last_check_type,
-                       last_check.created_at AS last_check_at
-                FROM assignments a
-                JOIN users u ON u.id = a.guard_user_id
-                JOIN sites s ON s.id = a.site_id
-                LEFT JOIN (
-                    SELECT c1.assignment_id, c1.check_type, c1.created_at
-                    FROM checkins c1
-                    INNER JOIN (
-                        SELECT assignment_id, MAX(id) AS max_id
-                        FROM checkins
-                        GROUP BY assignment_id
-                    ) latest_check ON latest_check.max_id = c1.id
-                ) AS last_check ON last_check.assignment_id = a.id
-                WHERE a.status = 'active'
-                ORDER BY a.shift_start ASC
-                LIMIT 80
-                """
-            )
-
-            alert_threshold_minutes = max(1, int(app.config["CHECKIN_ALERT_MINUTES"]))
-            patrol_alerts: list[dict] = []
-            now_utc = datetime.now(timezone.utc)
-            for assignment in active_guard_assignments:
-                last_check_minutes = minutes_since(assignment["last_check_at"], now_utc)
-                shift_start_minutes = minutes_since(assignment["shift_start"], now_utc)
-
-                if last_check_minutes is None:
-                    stale_minutes = shift_start_minutes if shift_start_minutes is not None else 0
-                    alert_reason = "No check-in logged on this active shift."
-                else:
-                    stale_minutes = last_check_minutes
-                    alert_reason = f"No patrol update for {stale_minutes} minutes."
-
-                patrol_alerts.append(
-                    {
-                        "assignment_id": assignment["id"],
-                        "site_id": assignment["site_id"],
-                        "site_name": assignment["site_name"],
-                        "guard_name": assignment["guard_name"],
-                        "last_check_type": assignment["last_check_type"] or "none",
-                        "last_check_at": assignment["last_check_at"] or "none",
-                        "stale_minutes": stale_minutes,
-                        "needs_follow_up": stale_minutes >= alert_threshold_minutes,
-                        "alert_reason": alert_reason,
-                    }
-                )
-
-            patrol_alerts.sort(
-                key=lambda item: (
-                    not item["needs_follow_up"],
-                    -item["stale_minutes"],
-                    item["guard_name"],
-                )
-            )
-            open_patrol_alerts = [item for item in patrol_alerts if item["needs_follow_up"]]
+            ops_brief = build_dispatcher_operations_brief()
+            alert_threshold_minutes = ops_brief["alert_threshold_minutes"]
+            patrol_alerts = ops_brief["patrol_alerts"]
+            open_patrol_alerts = ops_brief["open_patrol_alerts"]
 
             return render_template(
                 "dashboard_dispatcher.html",
@@ -752,6 +963,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 patrol_alerts=patrol_alerts,
                 open_patrol_alerts=open_patrol_alerts,
                 alert_threshold_minutes=alert_threshold_minutes,
+                ops_brief=ops_brief,
             )
 
         if g.user["role"] == "guard":
@@ -977,6 +1189,155 @@ def create_app(test_config: dict | None = None) -> Flask:
             f"{safe_filename_fragment(site['name'])}-client-report-"
             f"{datetime.now(timezone.utc).strftime('%Y%m%d')}.zip"
         )
+        response = make_response(archive_buffer.getvalue())
+        response.headers["Content-Type"] = "application/zip"
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/dispatcher/exports/operations-brief")
+    @roles_required("dispatcher")
+    def download_dispatcher_operations_brief():
+        brief = build_dispatcher_operations_brief()
+
+        summary = brief["summary"]
+        summary_txt = (
+            f"Secure Ops Portal - Dispatcher Operations Brief\n"
+            f"Generated at (UTC): {brief['generated_at']}\n"
+            f"Lookback window: last {brief['lookback_hours']} hour(s)\n"
+            f"Lookback start (UTC): {brief['lookback_start']}\n"
+            f"Open incidents (open/in_review): {summary['open_incidents']}\n"
+            f"Active assignments: {summary['active_assignments']}\n"
+            f"Patrol alerts needing follow-up: {summary['patrol_alerts']}\n"
+            f"Incidents created in lookback: {summary['incidents_recent']}\n"
+            f"Critical incidents in lookback: {summary['critical_incidents_recent']}\n"
+            f"High incidents in lookback: {summary['high_incidents_recent']}\n"
+            f"Guard check-ins in lookback: {summary['checkins_recent']}\n"
+            f"Client updates posted in lookback: {summary['client_updates_recent']}\n"
+            f"Action queue items: {len(brief['action_queue'])}\n"
+        )
+        readme_txt = (
+            "Secure Ops Portal dispatcher operations brief package\n\n"
+            "Files included:\n"
+            "- summary.txt: headline metrics and lookback window\n"
+            "- action_queue.csv: prioritized dispatcher actions\n"
+            "- patrol_alerts.csv: active shift patrol staleness board\n"
+            "- incidents_watchlist.csv: high/critical open or in-review incidents\n"
+            "- guard_activity.csv: per-guard latest check-in and recent incident volume\n"
+        )
+
+        action_queue_csv = io.StringIO(newline="")
+        action_queue_writer = csv.writer(action_queue_csv)
+        action_queue_writer.writerow(
+            ["priority", "category", "site_name", "owner", "created_at_utc", "details"]
+        )
+        for item in brief["action_queue"]:
+            action_queue_writer.writerow(
+                [
+                    item["priority"],
+                    item["category"],
+                    item["site_name"],
+                    item["owner"],
+                    item["created_at"],
+                    item["details"],
+                ]
+            )
+
+        patrol_alerts_csv = io.StringIO(newline="")
+        patrol_alerts_writer = csv.writer(patrol_alerts_csv)
+        patrol_alerts_writer.writerow(
+            [
+                "assignment_id",
+                "site_name",
+                "guard_name",
+                "last_check_type",
+                "last_check_at_utc",
+                "stale_minutes",
+                "needs_follow_up",
+                "alert_reason",
+            ]
+        )
+        for alert in brief["patrol_alerts"]:
+            patrol_alerts_writer.writerow(
+                [
+                    alert["assignment_id"],
+                    alert["site_name"],
+                    alert["guard_name"],
+                    alert["last_check_type"],
+                    alert["last_check_at"],
+                    alert["stale_minutes"],
+                    "yes" if alert["needs_follow_up"] else "no",
+                    alert["alert_reason"],
+                ]
+            )
+
+        incidents_csv = io.StringIO(newline="")
+        incidents_writer = csv.writer(incidents_csv)
+        incidents_writer.writerow(
+            [
+                "incident_id",
+                "title",
+                "site_name",
+                "guard_name",
+                "severity",
+                "status",
+                "client_visible",
+                "created_at_utc",
+                "updated_at_utc",
+            ]
+        )
+        for incident in brief["incidents_watchlist"]:
+            incidents_writer.writerow(
+                [
+                    incident["id"],
+                    incident["title"],
+                    incident["site_name"],
+                    incident["guard_name"],
+                    incident["severity"],
+                    incident["status"],
+                    "yes" if incident["client_visible"] else "no",
+                    incident["created_at"],
+                    incident["updated_at"],
+                ]
+            )
+
+        guard_activity_csv = io.StringIO(newline="")
+        guard_activity_writer = csv.writer(guard_activity_csv)
+        guard_activity_writer.writerow(
+            [
+                "guard_name",
+                "username",
+                "active_assignments",
+                "incidents_in_lookback",
+                "last_check_type",
+                "last_check_at_utc",
+                "last_check_age_minutes",
+            ]
+        )
+        for guard in brief["guard_activity"]:
+            guard_activity_writer.writerow(
+                [
+                    guard["guard_name"],
+                    guard["username"],
+                    guard["active_assignments"],
+                    guard["incidents_recent"],
+                    guard["last_check_type"],
+                    guard["last_check_at"],
+                    guard["last_check_age_minutes"],
+                ]
+            )
+
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("README.txt", readme_txt)
+            archive.writestr("summary.txt", summary_txt)
+            archive.writestr("action_queue.csv", action_queue_csv.getvalue())
+            archive.writestr("patrol_alerts.csv", patrol_alerts_csv.getvalue())
+            archive.writestr("incidents_watchlist.csv", incidents_csv.getvalue())
+            archive.writestr("guard_activity.csv", guard_activity_csv.getvalue())
+
+        archive_buffer.seek(0)
+        filename = f"dispatcher-operations-brief-{datetime.now(timezone.utc).strftime('%Y%m%d')}.zip"
         response = make_response(archive_buffer.getvalue())
         response.headers["Content-Type"] = "application/zip"
         response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'

@@ -18,6 +18,7 @@ A production-ready MVP for Operations Provider to monitor guards in real time, m
 5. Client logs in to view approved incident visibility and status updates.
 6. Dispatcher imports shift CSV exported from Connecteam.
 7. Client downloads a report package (`.zip`) containing summary + CSV exports for incident/update records.
+8. Dispatcher downloads an operations brief package (`.zip`) with priority action queue, patrol alerts, incident watchlist, and guard activity.
 
 ## Demo accounts
 
@@ -28,7 +29,7 @@ A production-ready MVP for Operations Provider to monitor guards in real time, m
 ## Run locally
 
 ```bash
-cd /Users/thomasverdier/projects/secure-ops-portal
+cd /Users/thomasverdier/projects/omega-guard-ops
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
@@ -42,9 +43,10 @@ Open `http://localhost:8000`.
 ```bash
 source .venv/bin/activate
 export APP_SECRET="replace-with-strong-secret"
-export DATABASE_PATH="/Users/thomasverdier/projects/secure-ops-portal/data/ops_portal.db"  # sqlite fallback
+export DATABASE_PATH="/Users/thomasverdier/projects/omega-guard-ops/data/ops_portal.db"  # sqlite fallback
 export PORT=8000
 export CHECKIN_ALERT_MINUTES=60
+export OPERATIONS_BRIEF_LOOKBACK_HOURS=24
 gunicorn --bind 0.0.0.0:${PORT} app:app
 ```
 
@@ -67,7 +69,7 @@ Notes:
 Use the included migration helper:
 
 ```bash
-cd /Users/thomasverdier/projects/secure-ops-portal
+cd /Users/thomasverdier/projects/omega-guard-ops
 source .venv/bin/activate
 python scripts/migrate_sqlite_to_postgres.py \
   --sqlite-path ./data/ops_portal.db \
@@ -124,6 +126,7 @@ Rows with missing required values or unknown guards are skipped.
 
 - `GET /api/status` (dispatcher session required): JSON live snapshot for guard status.
 - `GET /client/exports/site-package` (client session required): downloadable `.zip` with `summary.txt`, `client_updates.csv`, and `incident_visibility.csv`.
+- `GET /dispatcher/exports/operations-brief` (dispatcher session required): downloadable `.zip` with `summary.txt`, `action_queue.csv`, `patrol_alerts.csv`, `incidents_watchlist.csv`, and `guard_activity.csv`.
 
 ## Alerting behavior
 

@@ -152,3 +152,75 @@ def test_client_can_download_report_package(client):
     assert "Client Site A" in summary_text
     assert "Perimeter access hardware issue" in incidents_csv
     assert "Security team identified an access hardware issue" in updates_csv
+
+
+def test_dispatcher_can_download_operations_brief_package(client):
+    web, db_path = client
+    login(web, "dispatcher", "ops123!")
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old_shift_start = (now - timedelta(hours=4)).isoformat().replace("+00:00", "Z")
+    old_patrol_time = (now - timedelta(minutes=130)).isoformat().replace("+00:00", "Z")
+    created_at = now.isoformat().replace("+00:00", "Z")
+
+    with sqlite3.connect(db_path) as conn:
+        guard_id = conn.execute(
+            "SELECT id FROM users WHERE username='guard.alpha'"
+        ).fetchone()[0]
+        site_id = conn.execute("SELECT id FROM sites LIMIT 1").fetchone()[0]
+        assignment_id = conn.execute(
+            """
+            INSERT INTO assignments (site_id, guard_user_id, shift_start, shift_end, status, created_at)
+            VALUES (?, ?, ?, ?, 'active', ?)
+            """,
+            (site_id, guard_id, old_shift_start, old_shift_start, created_at),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO checkins (assignment_id, guard_user_id, check_type, note, created_at)
+            VALUES (?, ?, 'PATROL', ?, ?)
+            """,
+            (assignment_id, guard_id, "Patrol aging test", old_patrol_time),
+        )
+        conn.execute(
+            """
+            INSERT INTO incidents
+                (site_id, assignment_id, guard_user_id, title, details, severity, status, client_visible, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'critical', 'open', 1, ?, ?)
+            """,
+            (
+                site_id,
+                assignment_id,
+                guard_id,
+                "Gate forced entry alarm",
+                "Critical event waiting dispatch review.",
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+
+    response = web.get("/dispatcher/exports/operations-brief", follow_redirects=False)
+    assert response.status_code == 200
+    assert response.headers["Content-Type"].startswith("application/zip")
+    assert "attachment;" in response.headers.get("Content-Disposition", "")
+
+    archive = zipfile.ZipFile(io.BytesIO(response.data))
+    names = set(archive.namelist())
+    assert {
+        "README.txt",
+        "summary.txt",
+        "action_queue.csv",
+        "patrol_alerts.csv",
+        "incidents_watchlist.csv",
+        "guard_activity.csv",
+    } <= names
+
+    summary_text = archive.read("summary.txt").decode("utf-8")
+    action_queue_csv = archive.read("action_queue.csv").decode("utf-8")
+    watchlist_csv = archive.read("incidents_watchlist.csv").decode("utf-8")
+
+    assert "Dispatcher Operations Brief" in summary_text
+    assert "Patrol alerts needing follow-up" in summary_text
+    assert "Patrol gap" in action_queue_csv
+    assert "Gate forced entry alarm" in watchlist_csv

@@ -33,6 +33,7 @@
   </article>
 
   <nav class="quick-nav reveal reveal-delay-1">
+    <a href="#ops-brief" class="quick-link">Ops Brief</a>
     <a href="#patrol-alerts" class="quick-link">Patrol Alerts</a>
     <a href="#shift-builder" class="quick-link">Create Shift</a>
     <a href="#incident-queue" class="quick-link">Incident Queue</a>
@@ -46,21 +47,71 @@
       <p class="metric-helper">Personnel visible now</p>
     </article>
     <article class="panel metric-card reveal reveal-delay-1">
-      <p class="metric-label">Open Incidents</p>
-      <p class="metric-value">{{ incidents|selectattr('status', 'equalto', 'open')|list|length }}</p>
-      <p class="metric-helper">Awaiting status movement</p>
+      <p class="metric-label">Open + In Review</p>
+      <p class="metric-value">{{ ops_brief.summary.open_incidents }}</p>
+      <p class="metric-helper">Current incident workload</p>
     </article>
     <article class="panel metric-card reveal reveal-delay-2">
       <p class="metric-label">Active Assignments</p>
-      <p class="metric-value">{{ assignments|selectattr('status', 'equalto', 'active')|list|length }}</p>
-      <p class="metric-helper">Currently in-progress shifts</p>
+      <p class="metric-value">{{ ops_brief.summary.active_assignments }}</p>
+      <p class="metric-helper">Shifts currently in progress</p>
     </article>
     <article class="panel metric-card reveal">
-      <p class="metric-label">Patrol Alerts</p>
-      <p class="metric-value">{{ open_patrol_alerts|length }}</p>
-      <p class="metric-helper">Need dispatcher follow-up</p>
+      <p class="metric-label">Critical + High ({{ ops_brief.lookback_hours }}h)</p>
+      <p class="metric-value">{{ ops_brief.summary.critical_incidents_recent + ops_brief.summary.high_incidents_recent }}</p>
+      <p class="metric-helper">Recent severe incident intake</p>
     </article>
   </div>
+
+  <article id="ops-brief" class="panel reveal p-5">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 class="section-title">Operations Brief Snapshot</h2>
+        <p class="section-subtitle">Lookback: last {{ ops_brief.lookback_hours }} hour(s), generated {{ ops_brief.generated_at }}.</p>
+      </div>
+      <a href="{{ url_for('download_dispatcher_operations_brief') }}" class="btn-accent">Download Ops Brief (.zip)</a>
+    </div>
+
+    <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Patrol Alerts</p>
+        <p class="mt-1 font-display text-xl font-bold text-ops-ink">{{ ops_brief.summary.patrol_alerts }}</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Incidents ({{ ops_brief.lookback_hours }}h)</p>
+        <p class="mt-1 font-display text-xl font-bold text-ops-ink">{{ ops_brief.summary.incidents_recent }}</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Check-Ins ({{ ops_brief.lookback_hours }}h)</p>
+        <p class="mt-1 font-display text-xl font-bold text-ops-ink">{{ ops_brief.summary.checkins_recent }}</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Client Updates ({{ ops_brief.lookback_hours }}h)</p>
+        <p class="mt-1 font-display text-xl font-bold text-ops-ink">{{ ops_brief.summary.client_updates_recent }}</p>
+      </div>
+    </div>
+
+    <div class="mt-3">
+      <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-600">Priority Action Queue</h3>
+      <div class="mt-2 space-y-2">
+        {% for item in ops_brief.action_queue[:8] %}
+        <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="status-pill {% if item.priority == 'P1' %}border-rose-200 bg-rose-50 text-rose-700{% else %}border-amber-200 bg-amber-50 text-amber-700{% endif %}">{{ item.priority }}</span>
+              <span class="text-sm font-semibold text-slate-800">{{ item.category }} · {{ item.site_name }}</span>
+            </div>
+            <p class="text-xs text-slate-500">{{ item.created_at }}</p>
+          </div>
+          <p class="mt-1 text-sm text-slate-700">{{ item.details }}</p>
+          <p class="mt-1 text-xs text-slate-500">Owner: {{ item.owner }}</p>
+        </div>
+        {% else %}
+        <p class="text-sm text-slate-500">No immediate action items detected.</p>
+        {% endfor %}
+      </div>
+    </div>
+  </article>
 
   <article id="patrol-alerts" class="panel reveal p-5">
     <div class="flex flex-wrap items-center justify-between gap-2">
