@@ -229,3 +229,113 @@ def test_dispatcher_can_download_operations_brief_package(client):
     assert "Gate forced entry alarm" in watchlist_csv
     assert "Gate forced entry alarm" in incident_sla_csv
     assert "breached" in incident_sla_csv
+
+    with sqlite3.connect(db_path) as conn:
+        escalation_row = conn.execute(
+            """
+            SELECT message
+            FROM updates
+            WHERE message LIKE '[SLA ESCALATION]%'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert escalation_row is not None
+    assert "exceeded dispatcher acknowledgement sla" in escalation_row[0].lower()
+
+
+def test_dispatcher_can_acknowledge_incident(client):
+    web, db_path = client
+    login(web, "dispatcher", "ops123!")
+
+    with sqlite3.connect(db_path) as conn:
+        incident_id = conn.execute(
+            "SELECT id FROM incidents WHERE status IN ('open', 'in_review') ORDER BY id ASC LIMIT 1"
+        ).fetchone()[0]
+
+    response = web.post(
+        f"/dispatcher/incidents/{incident_id}/ack",
+        data={"note": "Supervisor taking ownership."},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"acknowledgement recorded" in response.data.lower()
+
+    with sqlite3.connect(db_path) as conn:
+        ack_row = conn.execute(
+            """
+            SELECT message
+            FROM updates
+            WHERE incident_id = ? AND message LIKE '[ACK]%'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (incident_id,),
+        ).fetchone()
+    assert ack_row is not None
+    assert "taking ownership" in ack_row[0].lower()
+
+
+def test_dispatcher_can_download_shift_handoff_package(client):
+    web, db_path = client
+    login(web, "dispatcher", "ops123!")
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    upcoming_start = (now + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    upcoming_end = (now + timedelta(hours=10)).isoformat().replace("+00:00", "Z")
+    created_at = (now - timedelta(minutes=50)).isoformat().replace("+00:00", "Z")
+
+    with sqlite3.connect(db_path) as conn:
+        guard_id = conn.execute(
+            "SELECT id FROM users WHERE username='guard.bravo'"
+        ).fetchone()[0]
+        site_id = conn.execute("SELECT id FROM sites LIMIT 1").fetchone()[0]
+        assignment_id = conn.execute(
+            """
+            INSERT INTO assignments (site_id, guard_user_id, shift_start, shift_end, status, created_at)
+            VALUES (?, ?, ?, ?, 'scheduled', ?)
+            """,
+            (site_id, guard_id, upcoming_start, upcoming_end, created_at),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO incidents
+                (site_id, assignment_id, guard_user_id, title, details, severity, status, client_visible, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'high', 'open', 1, ?, ?)
+            """,
+            (
+                site_id,
+                assignment_id,
+                guard_id,
+                "Lobby access control fault",
+                "Needs follow-up for handoff.",
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+
+    response = web.get("/dispatcher/exports/shift-handoff", follow_redirects=False)
+    assert response.status_code == 200
+    assert response.headers["Content-Type"].startswith("application/zip")
+    assert "attachment;" in response.headers.get("Content-Disposition", "")
+
+    archive = zipfile.ZipFile(io.BytesIO(response.data))
+    names = set(archive.namelist())
+    assert {
+        "README.txt",
+        "summary.txt",
+        "shift_coverage.csv",
+        "incident_followups.csv",
+        "patrol_followups.csv",
+        "internal_updates.csv",
+    } <= names
+
+    summary_text = archive.read("summary.txt").decode("utf-8")
+    coverage_csv = archive.read("shift_coverage.csv").decode("utf-8")
+    followups_csv = archive.read("incident_followups.csv").decode("utf-8")
+
+    assert "Shift Handoff Brief" in summary_text
+    assert "Assignments in handoff window" in summary_text
+    assert "Guard Bravo" in coverage_csv
+    assert "Lobby access control fault" in followups_csv

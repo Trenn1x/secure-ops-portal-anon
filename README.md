@@ -1,6 +1,6 @@
-# Secure Ops Portal
+# Omega Guard Services Command Portal
 
-A production-ready MVP for Operations Provider to monitor guards in real time, manage incidents, and publish client-facing updates.
+A production-ready MVP for Omega Guard Services to monitor guards in real time, manage incidents, and publish client-facing updates.
 
 ## Why this is valuable
 
@@ -19,6 +19,8 @@ A production-ready MVP for Operations Provider to monitor guards in real time, m
 6. Dispatcher imports shift CSV exported from Connecteam.
 7. Client downloads a report package (`.zip`) containing summary + CSV exports for incident/update records.
 8. Dispatcher downloads an operations brief package (`.zip`) with priority action queue, patrol alerts, incident SLA radar, watchlist, and guard activity.
+9. Dispatcher exports an automated shift handoff brief package (`.zip`) with coverage window, incident follow-ups, patrol follow-ups, and recent internal notes.
+10. Dispatcher logs per-incident acknowledgements; SLA breaches auto-generate escalation notes.
 
 ## Demo accounts
 
@@ -47,6 +49,7 @@ export DATABASE_PATH="/Users/thomasverdier/projects/omega-guard-ops/data/ops_por
 export PORT=8000
 export CHECKIN_ALERT_MINUTES=60
 export OPERATIONS_BRIEF_LOOKBACK_HOURS=24
+export SHIFT_HANDOFF_LOOKAHEAD_HOURS=12
 gunicorn --bind 0.0.0.0:${PORT} app:app
 ```
 
@@ -122,16 +125,20 @@ Import accepts common column names and auto-maps these fields:
 
 Rows with missing required values or unknown guards are skipped.
 
-## API endpoint
+## API endpoints
 
 - `GET /api/status` (dispatcher session required): JSON live snapshot for guard status.
 - `GET /client/exports/site-package` (client session required): downloadable `.zip` with `summary.txt`, `client_updates.csv`, and `incident_visibility.csv`.
 - `GET /dispatcher/exports/operations-brief` (dispatcher session required): downloadable `.zip` with `summary.txt`, `action_queue.csv`, `patrol_alerts.csv`, `incidents_watchlist.csv`, `incident_sla_radar.csv`, and `guard_activity.csv`.
+- `GET /dispatcher/exports/shift-handoff` (dispatcher session required): downloadable `.zip` with `summary.txt`, `shift_coverage.csv`, `incident_followups.csv`, `patrol_followups.csv`, and `internal_updates.csv`.
+- `POST /dispatcher/incidents/<incident_id>/ack` (dispatcher session required): records internal dispatcher acknowledgement note and resets acknowledgment SLA timer.
 
 ## Alerting behavior
 
 - Active assignments are flagged on the dispatcher dashboard when no check-in is logged within `CHECKIN_ALERT_MINUTES`.
 - Dispatcher can acknowledge an alert; this writes an internal update entry prefixed with `[ALERT ACK]`.
+- Incident acknowledgements are SLA-tracked by severity (critical 15m, high 30m, medium 60m, low 120m).
+- SLA breaches auto-create one internal escalation update per open incident, prefixed with `[SLA ESCALATION]`.
 
 ## Test
 

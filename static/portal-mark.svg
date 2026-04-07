@@ -15,5 +15,5 @@
   <path d="M92 111V135H148V111" stroke="#D5A13C" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M92 111C92 95 104 83 120 83C136 83 148 95 148 111" stroke="#D5A13C" stroke-width="10" stroke-linecap="round"/>
   <rect x="102" y="121" width="36" height="30" rx="8" fill="#D5A13C"/>
-  <text x="120" y="188" text-anchor="middle" fill="#D5A13C" font-family="Arial, sans-serif" font-weight="700" font-size="18">SOP</text>
+  <text x="120" y="188" text-anchor="middle" fill="#D5A13C" font-family="Arial, sans-serif" font-weight="700" font-size="18">OGS</text>
 </svg>

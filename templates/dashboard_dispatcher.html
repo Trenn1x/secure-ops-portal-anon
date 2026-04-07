@@ -34,6 +34,7 @@
 
   <nav class="quick-nav reveal reveal-delay-1">
     <a href="#ops-brief" class="quick-link">Ops Brief</a>
+    <a href="#shift-handoff" class="quick-link">Shift Handoff</a>
     <a href="#patrol-alerts" class="quick-link">Patrol Alerts</a>
     <a href="#shift-builder" class="quick-link">Create Shift</a>
     <a href="#incident-queue" class="quick-link">Incident Queue</a>
@@ -69,7 +70,10 @@
         <h2 class="section-title">Operations Brief Snapshot</h2>
         <p class="section-subtitle">Lookback: last {{ ops_brief.lookback_hours }} hour(s), generated {{ ops_brief.generated_at }}.</p>
       </div>
-      <a href="{{ url_for('download_dispatcher_operations_brief') }}" class="btn-accent">Download Ops Brief (.zip)</a>
+      <div class="flex flex-wrap items-center gap-2">
+        <a href="{{ url_for('download_dispatcher_operations_brief') }}" class="btn-accent">Download Ops Brief (.zip)</a>
+        <a href="{{ url_for('download_dispatcher_shift_handoff_brief') }}" class="btn-primary">Download Shift Handoff (.zip)</a>
+      </div>
     </div>
 
     <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
@@ -132,11 +136,71 @@
             {% endif %}
           </div>
           <p class="mt-1 text-sm text-slate-700">{{ incident.site_name }} · {{ incident.severity }}/{{ incident.status }} · owner {{ incident.guard_name }}</p>
-          <p class="mt-1 text-xs text-slate-500">Last touch {{ incident.last_touch_at }} · target {{ incident.sla_target_minutes }} min · to breach {{ incident.minutes_to_breach }} min</p>
+          <p class="mt-1 text-xs text-slate-500">Last dispatcher ack {{ incident.last_dispatch_ack_at }} · target {{ incident.sla_target_minutes }} min · to breach {{ incident.minutes_to_breach }} min</p>
         </div>
         {% else %}
         <p class="text-sm text-slate-500">No open incidents currently tracked for SLA.</p>
         {% endfor %}
+      </div>
+    </div>
+  </article>
+
+  <article id="shift-handoff" class="panel reveal p-5">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 class="section-title">Automated Shift Handoff Brief</h2>
+        <p class="section-subtitle">Window: next {{ shift_handoff.lookahead_hours }} hour(s), generated {{ shift_handoff.generated_at }}.</p>
+      </div>
+      <a href="{{ url_for('download_dispatcher_shift_handoff_brief') }}" class="btn-accent">Export Handoff Package</a>
+    </div>
+
+    <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Coverage Rows</p>
+        <p class="mt-1 font-display text-xl font-bold text-ops-ink">{{ shift_handoff.summary.coverage_rows }}</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Active Ending Soon</p>
+        <p class="mt-1 font-display text-xl font-bold text-amber-700">{{ shift_handoff.summary.active_ending_soon }}</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Incident Follow-ups</p>
+        <p class="mt-1 font-display text-xl font-bold text-rose-700">{{ shift_handoff.summary.incident_followups }}</p>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <p class="text-[0.7rem] font-semibold uppercase tracking-wide text-slate-500">Patrol Follow-ups</p>
+        <p class="mt-1 font-display text-xl font-bold text-ops-ink">{{ shift_handoff.summary.patrol_followups }}</p>
+      </div>
+    </div>
+
+    <div class="mt-3 grid gap-3 lg:grid-cols-2">
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-600">Coverage Preview</h3>
+        <div class="mt-2 space-y-2">
+          {% for row in shift_handoff.coverage_rows[:6] %}
+          <div class="rounded-lg border border-slate-200 bg-white/85 p-2.5">
+            <p class="text-sm font-semibold text-slate-800">#{{ row.assignment_id }} {{ row.site_name }} · {{ row.guard_name }}</p>
+            <p class="mt-1 text-xs text-slate-500">{{ row.status }} · starts {{ row.shift_start }} · ends {{ row.shift_end }}</p>
+            <p class="mt-1 text-xs text-slate-500">T-minus start {{ row.minutes_until_start }} min · end {{ row.minutes_until_end }} min</p>
+          </div>
+          {% else %}
+          <p class="text-sm text-slate-500">No upcoming coverage rows in handoff window.</p>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="rounded-xl border border-slate-200 bg-slate-50/90 p-3">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-600">Incident Follow-up Preview</h3>
+        <div class="mt-2 space-y-2">
+          {% for incident in shift_handoff.incident_followups[:6] %}
+          <div class="rounded-lg border border-slate-200 bg-white/85 p-2.5">
+            <p class="text-sm font-semibold text-slate-800">#{{ incident.id }} {{ incident.title }}</p>
+            <p class="mt-1 text-xs text-slate-500">{{ incident.site_name }} · {{ incident.severity }}/{{ incident.status }} · {{ incident.sla_state }}</p>
+            <p class="mt-1 text-xs text-slate-500">To breach: {{ incident.minutes_to_breach }} min · last ack {{ incident.last_dispatch_ack_at }}</p>
+          </div>
+          {% else %}
+          <p class="text-sm text-slate-500">No incident follow-ups in handoff window.</p>
+          {% endfor %}
+        </div>
       </div>
     </div>
   </article>
@@ -317,25 +381,47 @@
             {% else %}
               <span class="status-pill border-slate-200 bg-slate-100 text-slate-600">internal only</span>
             {% endif %}
+            {% if incident.ack_state == 'breached' %}
+              <span class="status-pill border-rose-200 bg-rose-50 text-rose-700">ack breached</span>
+            {% elif incident.ack_state == 'due_soon' %}
+              <span class="status-pill border-amber-200 bg-amber-50 text-amber-700">ack due soon</span>
+            {% elif incident.ack_state == 'on_track' %}
+              <span class="status-pill border-emerald-200 bg-emerald-50 text-emerald-700">ack on track</span>
+            {% endif %}
           </div>
+          {% if incident.ack_state != 'not_required' %}
+          <p class="mt-1.5 text-xs text-slate-500">
+            Ack target {{ incident.ack_target_minutes }} min · elapsed {{ incident.ack_elapsed_minutes }} min · to breach {{ incident.minutes_to_ack_breach }} min · last ack {{ incident.last_dispatch_ack_at or 'none' }}
+          </p>
+          {% endif %}
         </div>
-        <form method="post" action="{{ url_for('update_incident_status', incident_id=incident.id) }}" class="space-y-2">
-          <label class="block text-sm font-semibold text-slate-700">Status
-            <select name="status" required class="select-field">
-              {% for status in statuses %}
-              <option value="{{ status }}" {% if status == incident.status %}selected{% endif %}>{{ status }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label class="flex items-center gap-2 text-sm text-slate-700">
-            <input type="checkbox" name="client_visible" class="rounded border-slate-300 text-ops-golddeep focus:ring-ops-golddeep" {% if incident.client_visible %}checked{% endif %}>
-            Client visible
-          </label>
-          <label class="block text-sm font-semibold text-slate-700">Optional client message
-            <input type="text" name="client_message" placeholder="Explain status change" class="input-field">
-          </label>
-          <button type="submit" class="btn-secondary w-full focus:outline-none focus:ring-2 focus:ring-slate-600/30">Update Incident</button>
-        </form>
+        <div class="space-y-2">
+          <form method="post" action="{{ url_for('update_incident_status', incident_id=incident.id) }}" class="space-y-2">
+            <label class="block text-sm font-semibold text-slate-700">Status
+              <select name="status" required class="select-field">
+                {% for status in statuses %}
+                <option value="{{ status }}" {% if status == incident.status %}selected{% endif %}>{{ status }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="flex items-center gap-2 text-sm text-slate-700">
+              <input type="checkbox" name="client_visible" class="rounded border-slate-300 text-ops-golddeep focus:ring-ops-golddeep" {% if incident.client_visible %}checked{% endif %}>
+              Client visible
+            </label>
+            <label class="block text-sm font-semibold text-slate-700">Optional client message
+              <input type="text" name="client_message" placeholder="Explain status change" class="input-field">
+            </label>
+            <button type="submit" class="btn-secondary w-full focus:outline-none focus:ring-2 focus:ring-slate-600/30">Update Incident</button>
+          </form>
+          {% if incident.ack_state != 'not_required' %}
+          <form method="post" action="{{ url_for('acknowledge_incident', incident_id=incident.id) }}" class="space-y-2">
+            <label class="block text-sm font-semibold text-slate-700">Dispatcher acknowledgement note
+              <input type="text" name="note" placeholder="Optional ack note" class="input-field">
+            </label>
+            <button type="submit" class="btn-primary w-full focus:outline-none focus:ring-2 focus:ring-ops-ink/30">Acknowledge Incident</button>
+          </form>
+          {% endif %}
+        </div>
       </div>
       {% else %}
       <p class="text-sm text-slate-500">No incidents reported.</p>

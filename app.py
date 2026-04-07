@@ -27,6 +27,7 @@ ALLOWED_INCIDENT_SEVERITY = {"low", "medium", "high", "critical"}
 ALLOWED_CHECKIN_TYPES = {"IN", "PATROL", "OUT"}
 DEFAULT_CHECKIN_ALERT_MINUTES = 60
 DEFAULT_OPERATIONS_BRIEF_LOOKBACK_HOURS = 24
+DEFAULT_SHIFT_HANDOFF_LOOKAHEAD_HOURS = 12
 INCIDENT_SLA_WARNING_WINDOW_MINUTES = 10
 INCIDENT_SLA_TARGET_MINUTES = {
     "critical": 15,
@@ -86,6 +87,14 @@ def utc_now_iso() -> str:
 def incident_sla_target_minutes(severity: str | None) -> int:
     key = (severity or "").strip().lower()
     return INCIDENT_SLA_TARGET_MINUTES.get(key, INCIDENT_SLA_TARGET_MINUTES["medium"])
+
+
+def incident_sla_state(minutes_to_breach: int) -> str:
+    if minutes_to_breach < 0:
+        return "breached"
+    if minutes_to_breach <= INCIDENT_SLA_WARNING_WINDOW_MINUTES:
+        return "due_soon"
+    return "on_track"
 
 
 def normalize_header(value: str) -> str:
@@ -470,6 +479,12 @@ def create_app(test_config: dict | None = None) -> Flask:
                 str(DEFAULT_OPERATIONS_BRIEF_LOOKBACK_HOURS),
             )
         ),
+        SHIFT_HANDOFF_LOOKAHEAD_HOURS=int(
+            os.getenv(
+                "SHIFT_HANDOFF_LOOKAHEAD_HOURS",
+                str(DEFAULT_SHIFT_HANDOFF_LOOKAHEAD_HOURS),
+            )
+        ),
     )
 
     if test_config:
@@ -510,6 +525,149 @@ def create_app(test_config: dict | None = None) -> Flask:
             """,
             (client_user_id,),
         )
+
+    def fetch_incident_sla_radar_rows(now_utc: datetime) -> list[dict]:
+        incidents_open = fetch_all(
+            """
+            SELECT i.id,
+                   i.site_id,
+                   i.title,
+                   i.severity,
+                   i.status,
+                   i.client_visible,
+                   i.created_at,
+                   i.updated_at,
+                   incident_updates.last_update_at,
+                   ack_updates.last_ack_at AS last_dispatch_ack_at,
+                   s.name AS site_name,
+                   u.full_name AS guard_name
+            FROM incidents i
+            JOIN sites s ON s.id = i.site_id
+            JOIN users u ON u.id = i.guard_user_id
+            LEFT JOIN (
+                SELECT incident_id, MAX(created_at) AS last_update_at
+                FROM updates
+                WHERE incident_id IS NOT NULL
+                GROUP BY incident_id
+            ) AS incident_updates ON incident_updates.incident_id = i.id
+            LEFT JOIN (
+                SELECT incident_id, MAX(created_at) AS last_ack_at
+                FROM updates
+                WHERE incident_id IS NOT NULL
+                  AND audience = 'internal'
+                  AND message LIKE '[ACK]%'
+                GROUP BY incident_id
+            ) AS ack_updates ON ack_updates.incident_id = i.id
+            WHERE i.status IN ('open', 'in_review')
+            ORDER BY
+                CASE i.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,
+                i.created_at ASC
+            """
+        )
+
+        incident_sla_radar: list[dict] = []
+        for incident in incidents_open:
+            severity_key = (incident["severity"] or "").lower()
+            sla_target_minutes = incident_sla_target_minutes(severity_key)
+            ack_reference_at = incident["last_dispatch_ack_at"] or incident["created_at"]
+            minutes_since_ack = minutes_since(ack_reference_at, now_utc) or 0
+            minutes_to_breach = sla_target_minutes - minutes_since_ack
+            sla_state = incident_sla_state(minutes_to_breach)
+            incident_age_minutes = minutes_since(incident["created_at"], now_utc) or 0
+            last_touch_at = (
+                incident["last_update_at"] or incident["updated_at"] or incident["created_at"]
+            )
+
+            incident_sla_radar.append(
+                {
+                    "id": incident["id"],
+                    "site_id": incident["site_id"],
+                    "title": incident["title"],
+                    "severity": severity_key or "unknown",
+                    "status": incident["status"],
+                    "client_visible": incident["client_visible"],
+                    "created_at": incident["created_at"],
+                    "updated_at": incident["updated_at"],
+                    "last_touch_at": last_touch_at,
+                    "last_dispatch_ack_at": incident["last_dispatch_ack_at"] or "none",
+                    "ack_reference_at": ack_reference_at,
+                    "site_name": incident["site_name"],
+                    "guard_name": incident["guard_name"],
+                    "sla_target_minutes": sla_target_minutes,
+                    "minutes_since_ack": minutes_since_ack,
+                    "minutes_to_breach": minutes_to_breach,
+                    "sla_state": sla_state,
+                    "incident_age_minutes": incident_age_minutes,
+                }
+            )
+
+        incident_sla_radar.sort(
+            key=lambda item: (
+                {"breached": 0, "due_soon": 1, "on_track": 2}.get(item["sla_state"], 9),
+                {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(item["severity"], 9),
+                item["minutes_to_breach"],
+                -item["incident_age_minutes"],
+                item["site_name"],
+            )
+        )
+        return incident_sla_radar
+
+    def ensure_incident_sla_escalations(
+        incident_sla_radar: list[dict], author_user_id: int | None = None
+    ) -> int:
+        escalation_author = author_user_id
+        if escalation_author is None:
+            dispatcher = fetch_one(
+                "SELECT id FROM users WHERE role = 'dispatcher' ORDER BY id ASC LIMIT 1"
+            )
+            if dispatcher is None:
+                return 0
+            escalation_author = dispatcher["id"]
+
+        inserted = 0
+        with get_conn() as conn:
+            for incident in incident_sla_radar:
+                if incident["sla_state"] != "breached":
+                    continue
+
+                existing_note = conn.execute(
+                    """
+                    SELECT id
+                    FROM updates
+                    WHERE incident_id = ?
+                      AND audience = 'internal'
+                      AND message LIKE '[SLA ESCALATION]%'
+                    LIMIT 1
+                    """,
+                    (incident["id"],),
+                ).fetchone()
+                if existing_note is not None:
+                    continue
+
+                breach_minutes = abs(int(incident["minutes_to_breach"]))
+                escalation_message = (
+                    f"[SLA ESCALATION] Incident #{incident['id']} exceeded dispatcher "
+                    f"acknowledgement SLA by {breach_minutes} minute(s). Immediate follow-up required."
+                )
+                conn.execute(
+                    """
+                    INSERT INTO updates (site_id, incident_id, author_user_id, audience, message, created_at)
+                    VALUES (?, ?, ?, 'internal', ?, ?)
+                    """,
+                    (
+                        incident["site_id"],
+                        incident["id"],
+                        escalation_author,
+                        escalation_message,
+                        utc_now_iso(),
+                    ),
+                )
+                inserted += 1
+
+            if inserted:
+                conn.commit()
+
+        return inserted
 
     def build_patrol_alerts(
         alert_threshold_minutes: int, now_utc: datetime | None = None
@@ -578,7 +736,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         )
         return patrol_alerts
 
-    def build_dispatcher_operations_brief() -> dict:
+    def build_dispatcher_operations_brief(author_user_id: int | None = None) -> dict:
         lookback_hours = max(1, int(app.config["OPERATIONS_BRIEF_LOOKBACK_HOURS"]))
         alert_threshold_minutes = max(1, int(app.config["CHECKIN_ALERT_MINUTES"]))
         now_utc = datetime.now(timezone.utc).replace(microsecond=0)
@@ -587,33 +745,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         patrol_alerts = build_patrol_alerts(alert_threshold_minutes, now_utc)
         open_patrol_alerts = [item for item in patrol_alerts if item["needs_follow_up"]]
 
-        incidents_open = fetch_all(
-            """
-            SELECT i.id,
-                   i.title,
-                   i.severity,
-                   i.status,
-                   i.client_visible,
-                   i.created_at,
-                   i.updated_at,
-                   incident_updates.last_update_at,
-                   s.name AS site_name,
-                   u.full_name AS guard_name
-            FROM incidents i
-            JOIN sites s ON s.id = i.site_id
-            JOIN users u ON u.id = i.guard_user_id
-            LEFT JOIN (
-                SELECT incident_id, MAX(created_at) AS last_update_at
-                FROM updates
-                WHERE incident_id IS NOT NULL
-                GROUP BY incident_id
-            ) AS incident_updates ON incident_updates.incident_id = i.id
-            WHERE i.status IN ('open', 'in_review')
-            ORDER BY
-                CASE i.severity WHEN 'critical' THEN 2 WHEN 'high' THEN 1 ELSE 0 END DESC,
-                i.created_at ASC
-            """
-        )
+        incident_sla_radar = fetch_incident_sla_radar_rows(now_utc)
+        ensure_incident_sla_escalations(incident_sla_radar, author_user_id=author_user_id)
+        incident_sla_radar = fetch_incident_sla_radar_rows(now_utc)
 
         incidents_last_lookback = fetch_all(
             """
@@ -695,54 +829,9 @@ def create_app(test_config: dict | None = None) -> Flask:
                 incident_severity_counts["other"] += 1
 
         incident_sla_counts: dict[str, int] = {"breached": 0, "due_soon": 0, "on_track": 0}
-        incident_sla_radar: list[dict] = []
-        for incident in incidents_open:
-            severity_key = (incident["severity"] or "").lower()
-            sla_target_minutes = incident_sla_target_minutes(severity_key)
-            last_touch_at = (
-                incident["last_update_at"] or incident["updated_at"] or incident["created_at"]
-            )
-            minutes_since_last_touch = minutes_since(last_touch_at, now_utc) or 0
-            incident_age_minutes = minutes_since(incident["created_at"], now_utc) or 0
-            minutes_to_breach = sla_target_minutes - minutes_since_last_touch
+        for incident in incident_sla_radar:
+            incident_sla_counts[incident["sla_state"]] += 1
 
-            if minutes_to_breach < 0:
-                sla_state = "breached"
-            elif minutes_to_breach <= INCIDENT_SLA_WARNING_WINDOW_MINUTES:
-                sla_state = "due_soon"
-            else:
-                sla_state = "on_track"
-            incident_sla_counts[sla_state] += 1
-
-            incident_sla_radar.append(
-                {
-                    "id": incident["id"],
-                    "title": incident["title"],
-                    "severity": severity_key or "unknown",
-                    "status": incident["status"],
-                    "client_visible": incident["client_visible"],
-                    "created_at": incident["created_at"],
-                    "updated_at": incident["updated_at"],
-                    "last_touch_at": last_touch_at,
-                    "site_name": incident["site_name"],
-                    "guard_name": incident["guard_name"],
-                    "sla_target_minutes": sla_target_minutes,
-                    "minutes_since_last_touch": minutes_since_last_touch,
-                    "minutes_to_breach": minutes_to_breach,
-                    "sla_state": sla_state,
-                    "incident_age_minutes": incident_age_minutes,
-                }
-            )
-
-        incident_sla_radar.sort(
-            key=lambda item: (
-                {"breached": 0, "due_soon": 1, "on_track": 2}.get(item["sla_state"], 9),
-                {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(item["severity"], 9),
-                item["minutes_to_breach"],
-                -item["incident_age_minutes"],
-                item["site_name"],
-            )
-        )
         incidents_watchlist = [
             item for item in incident_sla_radar if item["severity"] in {"critical", "high"}
         ]
@@ -758,22 +847,18 @@ def create_app(test_config: dict | None = None) -> Flask:
             if incident["sla_state"] == "breached":
                 priority_rank = 1
                 priority = "P1"
+                urgency_score = 5000 + abs(incident["minutes_to_breach"])
+                sla_message = f"SLA breached by {abs(incident['minutes_to_breach'])} min"
             elif incident["severity"] == "critical" or incident["sla_state"] == "due_soon":
                 priority_rank = 2
                 priority = "P2"
+                urgency_score = 3000 - incident["minutes_to_breach"]
+                sla_message = f"{incident['minutes_to_breach']} min to SLA breach"
             else:
                 priority_rank = 3
                 priority = "P3"
-
-            if incident["minutes_to_breach"] < 0:
-                sla_message = f"SLA breached by {abs(incident['minutes_to_breach'])} min"
-                urgency_score = 5000 + abs(incident["minutes_to_breach"])
-            elif incident["minutes_to_breach"] == 0:
-                sla_message = "SLA due now"
-                urgency_score = 4000
-            else:
-                sla_message = f"{incident['minutes_to_breach']} min to SLA breach"
                 urgency_score = 1000 - incident["minutes_to_breach"]
+                sla_message = f"{incident['minutes_to_breach']} min to SLA breach"
 
             action_queue.append(
                 {
@@ -859,6 +944,109 @@ def create_app(test_config: dict | None = None) -> Flask:
             "open_patrol_alerts": open_patrol_alerts,
         }
 
+    def build_shift_handoff_brief(author_user_id: int | None = None) -> dict:
+        lookahead_hours = max(1, int(app.config["SHIFT_HANDOFF_LOOKAHEAD_HOURS"]))
+        alert_threshold_minutes = max(1, int(app.config["CHECKIN_ALERT_MINUTES"]))
+        now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+        lookahead_end_utc = now_utc + timedelta(hours=lookahead_hours)
+        now_iso = to_utc_iso(now_utc)
+        lookahead_end_iso = to_utc_iso(lookahead_end_utc)
+
+        patrol_alerts = build_patrol_alerts(alert_threshold_minutes, now_utc)
+        open_patrol_alerts = [item for item in patrol_alerts if item["needs_follow_up"]]
+
+        incident_sla_radar = fetch_incident_sla_radar_rows(now_utc)
+        ensure_incident_sla_escalations(incident_sla_radar, author_user_id=author_user_id)
+        incident_sla_radar = fetch_incident_sla_radar_rows(now_utc)
+        incident_followups = [
+            item
+            for item in incident_sla_radar
+            if item["sla_state"] in {"breached", "due_soon"}
+            or item["severity"] in {"critical", "high"}
+        ]
+
+        coverage_rows = fetch_all(
+            """
+            SELECT a.id,
+                   a.status,
+                   a.shift_start,
+                   a.shift_end,
+                   s.name AS site_name,
+                   u.full_name AS guard_name
+            FROM assignments a
+            JOIN sites s ON s.id = a.site_id
+            JOIN users u ON u.id = a.guard_user_id
+            WHERE a.shift_end >= ?
+              AND (
+                    a.status = 'active'
+                    OR (a.status = 'scheduled' AND a.shift_start <= ?)
+              )
+            ORDER BY a.shift_start ASC
+            """,
+            (now_iso, lookahead_end_iso),
+        )
+
+        coverage_summary: list[dict] = []
+        active_ending_soon = 0
+        for assignment in coverage_rows:
+            start_dt = parse_iso_to_utc(assignment["shift_start"]) or now_utc
+            end_dt = parse_iso_to_utc(assignment["shift_end"]) or now_utc
+            minutes_until_start = int((start_dt - now_utc).total_seconds() // 60)
+            minutes_until_end = int((end_dt - now_utc).total_seconds() // 60)
+            if assignment["status"] == "active" and minutes_until_end <= 120:
+                active_ending_soon += 1
+
+            coverage_summary.append(
+                {
+                    "assignment_id": assignment["id"],
+                    "status": assignment["status"],
+                    "shift_start": assignment["shift_start"],
+                    "shift_end": assignment["shift_end"],
+                    "site_name": assignment["site_name"],
+                    "guard_name": assignment["guard_name"],
+                    "minutes_until_start": minutes_until_start,
+                    "minutes_until_end": minutes_until_end,
+                }
+            )
+
+        recent_internal_updates = fetch_all(
+            """
+            SELECT up.created_at,
+                   up.message,
+                   s.name AS site_name,
+                   au.full_name AS author_name
+            FROM updates up
+            JOIN sites s ON s.id = up.site_id
+            JOIN users au ON au.id = up.author_user_id
+            WHERE up.audience = 'internal'
+            ORDER BY up.created_at DESC
+            LIMIT 15
+            """
+        )
+
+        return {
+            "generated_at": now_iso,
+            "lookahead_hours": lookahead_hours,
+            "lookahead_end": lookahead_end_iso,
+            "summary": {
+                "coverage_rows": len(coverage_summary),
+                "active_assignments": len(
+                    [row for row in coverage_summary if row["status"] == "active"]
+                ),
+                "scheduled_assignments": len(
+                    [row for row in coverage_summary if row["status"] == "scheduled"]
+                ),
+                "active_ending_soon": active_ending_soon,
+                "incident_followups": len(incident_followups),
+                "patrol_followups": len(open_patrol_alerts),
+                "recent_internal_updates": len(recent_internal_updates),
+            },
+            "coverage_rows": coverage_summary,
+            "incident_followups": incident_followups,
+            "patrol_followups": open_patrol_alerts,
+            "recent_internal_updates": [dict(row) for row in recent_internal_updates],
+        }
+
     def login_required(view):
         @wraps(view)
         def wrapped(*args, **kwargs):
@@ -900,7 +1088,7 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @app.get("/health")
     def health() -> tuple[dict[str, str], int]:
-        return {"status": "ok", "service": "secure-ops-portal"}, 200
+        return {"status": "ok", "service": "omega-guard-ops-portal"}, 200
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -972,23 +1160,55 @@ def create_app(test_config: dict | None = None) -> Flask:
                 """
             )
 
-            incidents = fetch_all(
+            incident_rows = fetch_all(
                 """
                 SELECT i.id,
+                       i.site_id,
                        i.title,
                        i.severity,
                        i.status,
                        i.client_visible,
                        i.created_at,
+                       ack_updates.last_ack_at AS last_dispatch_ack_at,
                        s.name AS site_name,
                        u.full_name AS guard_name
                 FROM incidents i
                 JOIN sites s ON s.id = i.site_id
                 JOIN users u ON u.id = i.guard_user_id
+                LEFT JOIN (
+                    SELECT incident_id, MAX(created_at) AS last_ack_at
+                    FROM updates
+                    WHERE incident_id IS NOT NULL
+                      AND audience = 'internal'
+                      AND message LIKE '[ACK]%'
+                    GROUP BY incident_id
+                ) AS ack_updates ON ack_updates.incident_id = i.id
                 ORDER BY i.created_at DESC
                 LIMIT 30
                 """
             )
+            dashboard_now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+            incidents: list[dict] = []
+            for incident in incident_rows:
+                item = dict(incident)
+                severity = (item["severity"] or "").lower()
+                if item["status"] in {"open", "in_review"}:
+                    ack_target = incident_sla_target_minutes(severity)
+                    ack_reference = item["last_dispatch_ack_at"] or item["created_at"]
+                    ack_elapsed = minutes_since(ack_reference, dashboard_now_utc) or 0
+                    minutes_to_breach = ack_target - ack_elapsed
+                    item["ack_target_minutes"] = ack_target
+                    item["ack_elapsed_minutes"] = ack_elapsed
+                    item["minutes_to_ack_breach"] = minutes_to_breach
+                    item["ack_state"] = incident_sla_state(minutes_to_breach)
+                    item["ack_reference_at"] = ack_reference
+                else:
+                    item["ack_target_minutes"] = ""
+                    item["ack_elapsed_minutes"] = ""
+                    item["minutes_to_ack_breach"] = ""
+                    item["ack_state"] = "not_required"
+                    item["ack_reference_at"] = item["last_dispatch_ack_at"] or "none"
+                incidents.append(item)
 
             assignments = fetch_all(
                 """
@@ -1042,7 +1262,8 @@ def create_app(test_config: dict | None = None) -> Flask:
                 """
             )
 
-            ops_brief = build_dispatcher_operations_brief()
+            ops_brief = build_dispatcher_operations_brief(author_user_id=g.user["id"])
+            shift_handoff = build_shift_handoff_brief(author_user_id=g.user["id"])
             alert_threshold_minutes = ops_brief["alert_threshold_minutes"]
             patrol_alerts = ops_brief["patrol_alerts"]
             open_patrol_alerts = ops_brief["open_patrol_alerts"]
@@ -1060,6 +1281,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 open_patrol_alerts=open_patrol_alerts,
                 alert_threshold_minutes=alert_threshold_minutes,
                 ops_brief=ops_brief,
+                shift_handoff=shift_handoff,
             )
 
         if g.user["role"] == "guard":
@@ -1266,7 +1488,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             f"Incident severity breakdown: {severity_breakdown}\n"
         )
         readme_txt = (
-            "Secure Ops Portal client export package\n\n"
+            "Omega Guard Services client export package\n\n"
             "Files included:\n"
             "- summary.txt: high-level counts and generation timestamp\n"
             "- client_updates.csv: updates sent to client audience\n"
@@ -1294,11 +1516,12 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.get("/dispatcher/exports/operations-brief")
     @roles_required("dispatcher")
     def download_dispatcher_operations_brief():
-        brief = build_dispatcher_operations_brief()
+        assert g.user is not None
+        brief = build_dispatcher_operations_brief(author_user_id=g.user["id"])
 
         summary = brief["summary"]
         summary_txt = (
-            f"Secure Ops Portal - Dispatcher Operations Brief\n"
+            f"Omega Guard Services - Dispatcher Operations Brief\n"
             f"Generated at (UTC): {brief['generated_at']}\n"
             f"Lookback window: last {brief['lookback_hours']} hour(s)\n"
             f"Lookback start (UTC): {brief['lookback_start']}\n"
@@ -1315,7 +1538,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             f"Action queue items: {len(brief['action_queue'])}\n"
         )
         readme_txt = (
-            "Secure Ops Portal dispatcher operations brief package\n\n"
+            "Omega Guard Services dispatcher operations brief package\n\n"
             "Files included:\n"
             "- summary.txt: headline metrics and lookback window\n"
             "- action_queue.csv: prioritized dispatcher actions\n"
@@ -1385,8 +1608,9 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "updated_at_utc",
                 "sla_state",
                 "sla_target_minutes",
-                "minutes_since_last_touch",
+                "minutes_since_ack",
                 "minutes_to_breach",
+                "last_dispatch_ack_at_utc",
             ]
         )
         for incident in brief["incidents_watchlist"]:
@@ -1403,8 +1627,9 @@ def create_app(test_config: dict | None = None) -> Flask:
                     incident["updated_at"],
                     incident["sla_state"],
                     incident["sla_target_minutes"],
-                    incident["minutes_since_last_touch"],
+                    incident["minutes_since_ack"],
                     incident["minutes_to_breach"],
+                    incident["last_dispatch_ack_at"],
                 ]
             )
 
@@ -1420,9 +1645,9 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "status",
                 "client_visible",
                 "created_at_utc",
-                "last_touch_at_utc",
+                "last_dispatch_ack_at_utc",
                 "sla_target_minutes",
-                "minutes_since_last_touch",
+                "minutes_since_ack",
                 "minutes_to_breach",
                 "sla_state",
             ]
@@ -1438,9 +1663,9 @@ def create_app(test_config: dict | None = None) -> Flask:
                     incident["status"],
                     "yes" if incident["client_visible"] else "no",
                     incident["created_at"],
-                    incident["last_touch_at"],
+                    incident["last_dispatch_ack_at"],
                     incident["sla_target_minutes"],
-                    incident["minutes_since_last_touch"],
+                    incident["minutes_since_ack"],
                     incident["minutes_to_breach"],
                     incident["sla_state"],
                 ]
@@ -1484,6 +1709,154 @@ def create_app(test_config: dict | None = None) -> Flask:
 
         archive_buffer.seek(0)
         filename = f"dispatcher-operations-brief-{datetime.now(timezone.utc).strftime('%Y%m%d')}.zip"
+        response = make_response(archive_buffer.getvalue())
+        response.headers["Content-Type"] = "application/zip"
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/dispatcher/exports/shift-handoff")
+    @roles_required("dispatcher")
+    def download_dispatcher_shift_handoff_brief():
+        assert g.user is not None
+        handoff = build_shift_handoff_brief(author_user_id=g.user["id"])
+        summary = handoff["summary"]
+
+        summary_txt = (
+            f"Omega Guard Services - Shift Handoff Brief\n"
+            f"Generated at (UTC): {handoff['generated_at']}\n"
+            f"Coverage lookahead window: next {handoff['lookahead_hours']} hour(s)\n"
+            f"Lookahead end (UTC): {handoff['lookahead_end']}\n"
+            f"Assignments in handoff window: {summary['coverage_rows']}\n"
+            f"Active assignments: {summary['active_assignments']}\n"
+            f"Scheduled assignments: {summary['scheduled_assignments']}\n"
+            f"Active assignments ending within 120 min: {summary['active_ending_soon']}\n"
+            f"Incident follow-ups: {summary['incident_followups']}\n"
+            f"Patrol follow-ups: {summary['patrol_followups']}\n"
+            f"Recent internal updates included: {summary['recent_internal_updates']}\n"
+        )
+        readme_txt = (
+            "Omega Guard Services shift handoff package\n\n"
+            "Files included:\n"
+            "- summary.txt: handoff metrics and window\n"
+            "- shift_coverage.csv: assignments across the handoff lookahead window\n"
+            "- incident_followups.csv: incidents requiring continued dispatcher attention\n"
+            "- patrol_followups.csv: patrol gaps requiring follow-up\n"
+            "- internal_updates.csv: latest internal notes for context transfer\n"
+        )
+
+        coverage_csv = io.StringIO(newline="")
+        coverage_writer = csv.writer(coverage_csv)
+        coverage_writer.writerow(
+            [
+                "assignment_id",
+                "status",
+                "site_name",
+                "guard_name",
+                "shift_start_utc",
+                "shift_end_utc",
+                "minutes_until_start",
+                "minutes_until_end",
+            ]
+        )
+        for row in handoff["coverage_rows"]:
+            coverage_writer.writerow(
+                [
+                    row["assignment_id"],
+                    row["status"],
+                    row["site_name"],
+                    row["guard_name"],
+                    row["shift_start"],
+                    row["shift_end"],
+                    row["minutes_until_start"],
+                    row["minutes_until_end"],
+                ]
+            )
+
+        incident_followups_csv = io.StringIO(newline="")
+        incident_followups_writer = csv.writer(incident_followups_csv)
+        incident_followups_writer.writerow(
+            [
+                "incident_id",
+                "site_name",
+                "guard_name",
+                "severity",
+                "status",
+                "sla_state",
+                "minutes_to_breach",
+                "last_dispatch_ack_at_utc",
+                "created_at_utc",
+                "title",
+            ]
+        )
+        for incident in handoff["incident_followups"]:
+            incident_followups_writer.writerow(
+                [
+                    incident["id"],
+                    incident["site_name"],
+                    incident["guard_name"],
+                    incident["severity"],
+                    incident["status"],
+                    incident["sla_state"],
+                    incident["minutes_to_breach"],
+                    incident["last_dispatch_ack_at"],
+                    incident["created_at"],
+                    incident["title"],
+                ]
+            )
+
+        patrol_followups_csv = io.StringIO(newline="")
+        patrol_followups_writer = csv.writer(patrol_followups_csv)
+        patrol_followups_writer.writerow(
+            [
+                "assignment_id",
+                "site_name",
+                "guard_name",
+                "last_check_type",
+                "last_check_at_utc",
+                "stale_minutes",
+                "alert_reason",
+            ]
+        )
+        for alert in handoff["patrol_followups"]:
+            patrol_followups_writer.writerow(
+                [
+                    alert["assignment_id"],
+                    alert["site_name"],
+                    alert["guard_name"],
+                    alert["last_check_type"],
+                    alert["last_check_at"],
+                    alert["stale_minutes"],
+                    alert["alert_reason"],
+                ]
+            )
+
+        internal_updates_csv = io.StringIO(newline="")
+        internal_updates_writer = csv.writer(internal_updates_csv)
+        internal_updates_writer.writerow(
+            ["created_at_utc", "site_name", "author_name", "message"]
+        )
+        for update in handoff["recent_internal_updates"]:
+            internal_updates_writer.writerow(
+                [
+                    update["created_at"],
+                    update["site_name"],
+                    update["author_name"],
+                    update["message"],
+                ]
+            )
+
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("README.txt", readme_txt)
+            archive.writestr("summary.txt", summary_txt)
+            archive.writestr("shift_coverage.csv", coverage_csv.getvalue())
+            archive.writestr("incident_followups.csv", incident_followups_csv.getvalue())
+            archive.writestr("patrol_followups.csv", patrol_followups_csv.getvalue())
+            archive.writestr("internal_updates.csv", internal_updates_csv.getvalue())
+
+        archive_buffer.seek(0)
+        filename = f"dispatcher-shift-handoff-{datetime.now(timezone.utc).strftime('%Y%m%d')}.zip"
         response = make_response(archive_buffer.getvalue())
         response.headers["Content-Type"] = "application/zip"
         response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
@@ -1656,6 +2029,55 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
 
         flash("Incident status updated.", "success")
+        return redirect(url_for("dashboard"))
+
+    @app.post("/dispatcher/incidents/<int:incident_id>/ack")
+    @roles_required("dispatcher")
+    def acknowledge_incident(incident_id: int):
+        assert g.user is not None
+        note = (request.form.get("note") or "").strip()
+
+        incident = fetch_one(
+            """
+            SELECT id, site_id, title, severity, status
+            FROM incidents
+            WHERE id = ?
+            """,
+            (incident_id,),
+        )
+        if incident is None:
+            flash("Incident not found.", "error")
+            return redirect(url_for("dashboard"))
+
+        if incident["status"] not in {"open", "in_review"}:
+            flash("Acknowledgement applies to open or in-review incidents only.", "warning")
+            return redirect(url_for("dashboard"))
+
+        target_minutes = incident_sla_target_minutes(incident["severity"])
+        ack_message = (
+            f"[ACK] Dispatcher acknowledged incident #{incident['id']} "
+            f"(target {target_minutes} min)."
+        )
+        if note:
+            ack_message = f"{ack_message} Note: {note}"
+
+        execute(
+            """
+            INSERT INTO updates (site_id, incident_id, author_user_id, audience, message, created_at)
+            VALUES (?, ?, ?, 'internal', ?, ?)
+            """,
+            (incident["site_id"], incident["id"], g.user["id"], ack_message, utc_now_iso()),
+        )
+        execute(
+            """
+            UPDATE incidents
+            SET updated_at = ?
+            WHERE id = ?
+            """,
+            (utc_now_iso(), incident["id"]),
+        )
+
+        flash("Incident acknowledgement recorded.", "success")
         return redirect(url_for("dashboard"))
 
     @app.post("/dispatcher/connecteam/import")
