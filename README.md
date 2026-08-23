@@ -1,37 +1,16 @@
-# Omega Guard Services Command Portal
+# Security Operations Command Portal
 
-A production-ready MVP for Omega Guard Services to monitor guards in real time, manage incidents, and publish client-facing updates.
+A role-based Flask operations portal for shift coverage, patrol visibility, incident triage, client updates, and handoff reporting.
 
-## Why this is valuable
+This public portfolio version uses synthetic users and records. It is built from real security-operations constraints, but it is not presented as a deployed client system.
 
-- Gives dispatch one operational view for shift status, incidents, and updates.
-- Gives guards a fast check-in/check-out and incident workflow.
-- Gives clients transparent updates without exposing internal chatter.
-- Supports Connecteam operations through CSV shift import.
+## Start here
 
-## Core workflows
-
-1. Dispatcher logs in and creates/adjusts assignments.
-2. Guard logs patrol check-ins and submits incidents from assignment context.
-3. Dispatcher triages incidents, updates status, and sends client messages.
-4. Dispatcher monitors a patrol alert board for active shifts with stale/no recent check-ins.
-5. Client logs in to view approved incident visibility and status updates.
-6. Dispatcher imports shift CSV exported from Connecteam.
-7. Client downloads a report package (`.zip`) containing summary + CSV exports for incident/update records.
-8. Dispatcher downloads an operations brief package (`.zip`) with priority action queue, patrol alerts, incident SLA radar, watchlist, and guard activity.
-9. Dispatcher exports an automated shift handoff brief package (`.zip`) with coverage window, incident follow-ups, patrol follow-ups, and recent internal notes.
-10. Dispatcher logs per-incident acknowledgements; SLA breaches auto-generate escalation notes.
-
-## Demo accounts
-
-- Dispatcher: `dispatcher` / `ops123!`
-- Guard: `guard.alpha` / `ops123!`
-- Client: `client.portal` / `ops123!`
-
-## Run locally
+The fastest way to evaluate the project is to run it locally, sign in as each role, and follow one incident from guard submission through dispatcher acknowledgement and client-visible reporting.
 
 ```bash
-cd /Users/thomasverdier/projects/omega-guard-ops
+git clone https://github.com/Trenn1x/secure-ops-portal-anon.git
+cd secure-ops-portal-anon
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
@@ -40,12 +19,97 @@ python app.py
 
 Open `http://localhost:8000`.
 
-## Production run (Gunicorn)
+Demo-only accounts:
+
+| Role | Username | Password |
+|---|---|---|
+| Dispatcher | `dispatcher` | `ops123!` |
+| Guard | `guard.alpha` | `ops123!` |
+| Client | `client.portal` | `ops123!` |
+
+## What this project demonstrates
+
+| Capability | Evidence in the repository |
+|---|---|
+| Workflow design | Separate dispatcher, guard, and client paths with explicit visibility boundaries |
+| Operational prioritization | Patrol-gap alerts, severity-based acknowledgement SLAs, and action queues |
+| Data integration | Idempotent Connecteam-compatible CSV imports with validation and audit fields |
+| Reporting | Client packages, dispatcher operations briefs, and shift-handoff ZIP exports |
+| Persistence | SQLite for local use, Postgres support for durable deployment, and a migration helper |
+| Delivery discipline | Docker, Fly.io, Render, Vercel, environment examples, and 10 checked-in integration tests |
+
+## Core workflow
+
+1. A dispatcher creates assignments or imports shifts from CSV.
+2. A guard starts an assignment, records patrol check-ins, and submits incidents.
+3. The portal flags stale patrol activity and overdue incident acknowledgements.
+4. A dispatcher acknowledges, triages, and updates each incident.
+5. A client sees only approved records and can download a site report package.
+6. Dispatch exports an operations brief or shift-handoff package for the next operator.
+
+## Architecture
+
+```text
+Browser roles
+  |-- Dispatcher
+  |-- Guard
+  `-- Client
+        |
+        v
+Flask application
+  |-- session and role checks
+  |-- assignment, patrol, incident, and update workflows
+  |-- CSV import and ZIP/CSV report generation
+  `-- operational alert and SLA logic
+        |
+        v
+SQLite locally / Postgres in durable deployments
+```
+
+The application uses a Flask app factory, server-rendered templates, role-aware routes, and SQL persistence. `DATABASE_URL` selects Postgres; otherwise the app uses SQLite.
+
+## Verification
 
 ```bash
-source .venv/bin/activate
-export APP_SECRET="replace-with-strong-secret"
-export DATABASE_PATH="/Users/thomasverdier/projects/omega-guard-ops/data/ops_portal.db"  # sqlite fallback
+pytest -q
+```
+
+The 10 integration tests in `tests/test_app.py` cover:
+
+- role login and guard dashboard access
+- incident submission
+- shift-template download and CSV import
+- idempotent external shift updates
+- stale-patrol alert acknowledgement
+- client report packages
+- dispatcher operations briefs
+- incident acknowledgement and SLA escalation
+- shift-handoff packages
+
+## Import behavior
+
+The CSV importer recognizes common shift-export fields, including:
+
+- site or location
+- guard username or employee name
+- shift start and end
+- external shift and job IDs
+- notes
+
+When an external shift ID is supplied, re-importing updates the scheduled record instead of duplicating it. Active and completed assignments are protected from overwrite. Rejected rows are reported with a reason, while the raw source payload and source system remain available for audit.
+
+## Export surfaces
+
+- Client site package: summary, client updates, and client-visible incidents
+- Dispatcher operations brief: action queue, patrol alerts, incident watchlist, SLA radar, and guard activity
+- Shift handoff: coverage window, incident follow-ups, patrol follow-ups, and internal updates
+- Connecteam-compatible shift template
+
+## Production configuration
+
+```bash
+export APP_SECRET="replace-with-a-strong-secret"
+export DATABASE_URL="postgresql://user:password@host:5432/ops_portal"
 export PORT=8000
 export CHECKIN_ALERT_MINUTES=60
 export OPERATIONS_BRIEF_LOOKBACK_HOURS=24
@@ -53,107 +117,29 @@ export SHIFT_HANDOFF_LOOKAHEAD_HOURS=12
 gunicorn --bind 0.0.0.0:${PORT} app:app
 ```
 
-## Postgres (durable production)
-
-Set `DATABASE_URL` and the app auto-switches to Postgres:
+To migrate an existing SQLite database:
 
 ```bash
-export DATABASE_URL="postgresql://user:password@host:5432/ops_portal"
-```
-
-Notes:
-
-- `DATABASE_URL` takes precedence over `DATABASE_PATH`.
-- Schema auto-initializes on startup (`CREATE TABLE IF NOT EXISTS`).
-- Existing SQLite data is not auto-migrated; export/import is needed for cutover.
-
-### SQLite -> Postgres migration
-
-Use the included migration helper:
-
-```bash
-cd /Users/thomasverdier/projects/omega-guard-ops
-source .venv/bin/activate
 python scripts/migrate_sqlite_to_postgres.py \
   --sqlite-path ./data/ops_portal.db \
   --postgres-url "postgresql://user:password@host:5432/ops_portal"
 ```
 
-Dry-run first:
+Use `--dry-run` before a real migration.
 
-```bash
-python scripts/migrate_sqlite_to_postgres.py --dry-run
-```
+## Deployment files
 
-## Deploy options
+- `Dockerfile`
+- `fly.toml`
+- `render.yaml`
+- `vercel.json`
+- `.env.example`
 
-### Fly.io
+For durable production data, use managed Postgres. A Vercel `/tmp` SQLite database is suitable only for a disposable demo.
 
-```bash
-fly launch --no-deploy --name secure-ops-portal
-fly volumes create ops_portal_data --region ewr --size 1
-fly secrets set APP_SECRET="replace-with-strong-secret"
-fly deploy
-```
+## Scope and security notes
 
-### Vercel (fastest path)
+- The included credentials are demo credentials and must be replaced before deployment.
+- This repository contains synthetic portfolio data, not operational client records.
+- A real deployment still requires a security review, stronger identity controls, secrets management, backup and retention policy, monitoring, and organization-specific authorization rules.
 
-```bash
-vercel --prod
-```
-
-Set runtime env vars in the Vercel project:
-
-- `APP_SECRET` = strong random value
-- `DATABASE_URL` = managed Postgres connection string (recommended)
-- `DATABASE_PATH` = `/tmp/ops_portal.db` (demo-only fallback)
-
-Note: `/tmp` is ephemeral on Vercel serverless; use `DATABASE_URL` for durable production data.
-
-### Render
-
-- Connect this repo and use `render.yaml`.
-- Render provisions a persistent disk at `/data`.
-
-## Notes on Connecteam import
-
-Import accepts common column names and auto-maps these fields:
-
-- Site: `site`, `site name`, `location`, `job site`
-- Guard: `guard username`, `username`, `employee`, `employee name`
-- Start/End: `shift start` + `shift end` (or common variants)
-- External Shift ID: `shift id`, `shift_id`, `timesheet id`
-- External Job ID: `job id`, `job code`, `position id`
-
-Integration-ready behavior:
-
-- Use `shift id` to make imports idempotent (re-import updates existing scheduled rows instead of duplicating).
-- Active/completed rows are protected from overwrite.
-- Invalid rows are skipped with reason breakdown in dispatcher flash messages.
-- Raw source row payload is stored in `assignments.source_payload` for audit.
-- `assignments.source_system` marks `connecteam` vs `manual`.
-
-Rows with missing required values, invalid datetime windows, or unknown guards are skipped.
-
-## API endpoints
-
-- `GET /api/status` (dispatcher session required): JSON live snapshot for guard status.
-- `GET /client/exports/site-package` (client session required): downloadable `.zip` with `summary.txt`, `client_updates.csv`, and `incident_visibility.csv`.
-- `GET /dispatcher/exports/operations-brief` (dispatcher session required): downloadable `.zip` with `summary.txt`, `action_queue.csv`, `patrol_alerts.csv`, `incidents_watchlist.csv`, `incident_sla_radar.csv`, and `guard_activity.csv`.
-- `GET /dispatcher/exports/shift-handoff` (dispatcher session required): downloadable `.zip` with `summary.txt`, `shift_coverage.csv`, `incident_followups.csv`, `patrol_followups.csv`, and `internal_updates.csv`.
-- `GET /dispatcher/connecteam/template` (dispatcher session required): downloadable CSV template for Connecteam-compatible imports.
-- `POST /dispatcher/incidents/<incident_id>/ack` (dispatcher session required): records internal dispatcher acknowledgement note and resets acknowledgment SLA timer.
-
-## Alerting behavior
-
-- Active assignments are flagged on the dispatcher dashboard when no check-in is logged within `CHECKIN_ALERT_MINUTES`.
-- Dispatcher can acknowledge an alert; this writes an internal update entry prefixed with `[ALERT ACK]`.
-- Incident acknowledgements are SLA-tracked by severity (critical 15m, high 30m, medium 60m, low 120m).
-- SLA breaches auto-create one internal escalation update per open incident, prefixed with `[SLA ESCALATION]`.
-
-## Test
-
-```bash
-source .venv/bin/activate
-pytest
-```
