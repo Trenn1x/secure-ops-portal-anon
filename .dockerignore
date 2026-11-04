@@ -1,0 +1,13 @@
+**
+!Dockerfile
+!requirements.txt
+!app.py
+!templates/
+!templates/**
+!static/
+!static/**
+!scripts/
+!scripts/**
+**/__pycache__/
+**/*.pyc
+**/.DS_Store

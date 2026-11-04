@@ -1,0 +1,37 @@
+{% for checkin in received_checkins %}
+<tr class="border-b border-slate-100"{% if checkin.late_minutes is not none %} data-late-receipt{% endif %}>
+  <td class="px-3 py-2.5">{{ checkin.guard_name }}</td>
+  <td class="px-3 py-2.5">#{{ checkin.assignment_id }} {{ checkin.site_name }}</td>
+  <td class="px-3 py-2.5">{{ checkin.check_type }}</td>
+  <td class="px-3 py-2.5"><time datetime="{{ checkin.created_at }}">{{ checkin.created_at }}</time></td>
+  <td class="px-3 py-2.5">
+    {% if checkin.synced_at %}
+      {% if checkin.late_minutes is not none %}
+      <span class="status-pill border-amber-200 bg-amber-50 text-amber-800">Synced late</span>
+      <span class="text-sm text-slate-700">{{ checkin.late_minutes }} min delay</span>
+      {% else %}
+      <span class="font-semibold text-emerald-800">Synced</span>
+      {% endif %}
+    <time class="block text-sm" datetime="{{ checkin.synced_at }}">{{ checkin.synced_at }}</time>
+    {% else %}
+    <span class="text-slate-600">Direct entry</span>
+    {% endif %}
+  </td>
+  <td class="px-3 py-2.5">
+    {% if checkin.acknowledged_at %}
+    <span class="font-semibold text-slate-800">Acknowledged</span>
+    <span class="block text-sm">{{ checkin.acknowledged_by }}</span>
+    <time class="block text-sm" datetime="{{ checkin.acknowledged_at }}">{{ checkin.acknowledged_at }}</time>
+    {% elif checkin.late_minutes is not none %}
+    <form method="post" action="{{ url_for('acknowledge_checkin_receipt', checkin_id=checkin.id) }}" data-receipt-ack>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn-secondary">Acknowledge<span class="sr-only"> {{ checkin.guard_name }}'s {{ checkin.check_type }} check-in at {{ checkin.created_at }}</span></button>
+    </form>
+    {% else %}
+    <span class="text-slate-500">—</span>
+    {% endif %}
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="6" class="px-3 py-3 text-slate-500">{% if review_queue %}No late check-ins awaiting acknowledgement.{% else %}No check-ins received yet.{% endif %}</td></tr>
+{% endfor %}

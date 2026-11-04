@@ -3,13 +3,20 @@ import io
 import json
 import os
 import re
+import secrets
 import sqlite3
 import zipfile
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from hashlib import sha256
+from hmac import digest as hmac_digest
+from time import time
+from uuid import UUID
 
+import click
 from flask import (
     Flask,
+    abort,
     flash,
     g,
     jsonify,
@@ -22,11 +29,23 @@ from flask import (
 )
 from werkzeug.security import check_password_hash, generate_password_hash
 
+DEMO_PROFILES = {
+    "dispatcher": ("dispatcher", "Operations Desk"),
+    "guard.alpha": ("guard", "Guard Alpha"),
+    "guard.bravo": ("guard", "Guard Bravo"),
+    "client.portal": ("client", "Client Representative"),
+}
+DEMO_PASSWORD = "ops123!"
+
 ALLOWED_ROLES = {"dispatcher", "guard", "client"}
 ALLOWED_INCIDENT_STATUS = {"open", "in_review", "resolved", "closed"}
 ALLOWED_INCIDENT_SEVERITY = {"low", "medium", "high", "critical"}
 ALLOWED_CHECKIN_TYPES = {"IN", "PATROL", "OUT"}
+DEFAULT_SESSION_HOURS = 12
+LOGIN_ACCOUNT_LIMIT = 10
+LOGIN_WINDOW_SECONDS = 300
 DEFAULT_CHECKIN_ALERT_MINUTES = 60
+DEFAULT_CHECKIN_LATE_SYNC_MINUTES = 5
 DEFAULT_OPERATIONS_BRIEF_LOOKBACK_HOURS = 24
 DEFAULT_SHIFT_HANDOFF_LOOKAHEAD_HOURS = 12
 CONNECTEAM_SOURCE_SYSTEM = "connecteam"
@@ -161,7 +180,7 @@ def detect_db_backend(database_value: str) -> str:
 
 def adapt_query(query: str, backend: str) -> str:
     if backend == "postgres":
-        return query.replace("?", "%s")
+        return query.replace("%", "%%").replace("?", "%s")
     return query
 
 
@@ -223,6 +242,7 @@ def init_db(database_value: str, backend: str) -> None:
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL CHECK(role IN ('dispatcher', 'guard', 'client')),
                     full_name TEXT NOT NULL,
+                    is_demo INTEGER NOT NULL DEFAULT 0 CHECK(is_demo IN (0, 1)),
                     created_at TEXT NOT NULL
                 );
 
@@ -304,6 +324,7 @@ def init_db(database_value: str, backend: str) -> None:
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('dispatcher', 'guard', 'client')),
                 full_name TEXT NOT NULL,
+                is_demo INTEGER NOT NULL DEFAULT 0 CHECK(is_demo IN (0, 1)),
                 created_at TEXT NOT NULL
             )
             """
@@ -390,8 +411,60 @@ def upgrade_schema(database_value: str, backend: str) -> None:
         "imported_at": "TEXT",
     }
 
+    checkin_columns = {
+        "client_event_id": "TEXT",
+        "synced_at": "TEXT",
+        "acknowledged_at": "TEXT",
+        "acknowledged_by": "BIGINT REFERENCES users(id)",
+    }
+    checkin_unique_index = """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_checkins_client_event
+        ON checkins(guard_user_id, client_event_id)
+    """
+
+    checkin_receipt_index = """
+        CREATE INDEX IF NOT EXISTS idx_checkins_receipt_order
+        ON checkins((COALESCE(synced_at, created_at)) DESC, id DESC)
+    """
+
+    auth_session_table = """
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            token_digest TEXT PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            expires_at BIGINT NOT NULL
+        )
+    """
+    auth_session_expiry_index = """
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)
+    """
+
+    auth_session_user_index = """
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)
+    """
+
+    login_attempts_table = """
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            bucket TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL,
+            expires_at BIGINT NOT NULL
+        )
+    """
+    login_attempts_expiry_index = """
+        CREATE INDEX IF NOT EXISTS idx_login_attempts_expires_at ON login_attempts(expires_at)
+    """
+
+    user_columns = {
+        "is_demo": "INTEGER NOT NULL DEFAULT 0 CHECK(is_demo IN (0, 1))",
+        "disabled_at": "TEXT",
+    }
+
     if backend == "sqlite":
         with sqlite3.connect(database_value) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+            for column, spec in user_columns.items():
+                if column not in existing_user_columns:
+                    conn.execute(f"ALTER TABLE users ADD COLUMN {column} {spec}")
             existing_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(assignments)").fetchall()
             }
@@ -407,11 +480,26 @@ def upgrade_schema(database_value: str, backend: str) -> None:
                 WHERE external_shift_id IS NOT NULL
                 """
             )
+            existing_checkin_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(checkins)")
+            }
+            for column, spec in checkin_columns.items():
+                if column not in existing_checkin_columns:
+                    conn.execute(f"ALTER TABLE checkins ADD COLUMN {column} {spec}")
+            conn.execute(checkin_unique_index)
+            conn.execute(checkin_receipt_index)
+            conn.execute(auth_session_table)
+            conn.execute(auth_session_expiry_index)
+            conn.execute(auth_session_user_index)
+            conn.execute(login_attempts_table)
+            conn.execute(login_attempts_expiry_index)
             conn.commit()
         return
 
     with open_raw_connection(database_value, backend) as conn:
         db = DbConnection(conn, backend)
+        for column, spec in user_columns.items():
+            db.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {column} {spec}")
         existing_columns_rows = db.execute(
             """
             SELECT column_name
@@ -430,12 +518,45 @@ def upgrade_schema(database_value: str, backend: str) -> None:
             WHERE external_shift_id IS NOT NULL
             """
         )
+        for column, spec in checkin_columns.items():
+            db.execute(f"ALTER TABLE checkins ADD COLUMN IF NOT EXISTS {column} {spec}")
+        db.execute(checkin_unique_index)
+        db.execute(checkin_receipt_index)
+        db.execute(auth_session_table)
+        db.execute(auth_session_expiry_index)
+        db.execute(auth_session_user_index)
+        db.execute(login_attempts_table)
+        db.execute(login_attempts_expiry_index)
         db.commit()
 
 
-def seed_data(database_value: str, backend: str) -> None:
+def mark_legacy_demo_users(database_value: str, backend: str) -> None:
     with open_raw_connection(database_value, backend) as conn:
         db = DbConnection(conn, backend)
+        candidates = db.execute(
+            """
+            SELECT id, username, password_hash, role, full_name FROM users
+            WHERE is_demo = 0 AND username IN (?, ?, ?, ?)
+            """,
+            tuple(DEMO_PROFILES),
+        ).fetchall()
+        for user in candidates:
+            original_profile = (user["role"], user["full_name"]) == DEMO_PROFILES[user["username"]]
+            if original_profile or check_password_hash(user["password_hash"], DEMO_PASSWORD):
+                db.execute(
+                    "UPDATE users SET is_demo = 1 WHERE id = ? AND password_hash = ?",
+                    (user["id"], user["password_hash"]),
+                )
+        db.commit()
+
+
+def seed_demo_data(database_value: str, backend: str) -> None:
+    with open_raw_connection(database_value, backend) as conn:
+        db = DbConnection(conn, backend)
+        if backend == "sqlite":
+            db.execute("BEGIN IMMEDIATE")
+        else:
+            db.execute("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
         count = db.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
         if count > 0:
             return
@@ -443,38 +564,38 @@ def seed_data(database_value: str, backend: str) -> None:
         now = utc_now_iso()
         dispatcher_id = db.execute(
             """
-            INSERT INTO users (username, password_hash, role, full_name, created_at)
-            VALUES (?, ?, 'dispatcher', ?, ?)
+            INSERT INTO users (username, password_hash, role, full_name, created_at, is_demo)
+            VALUES (?, ?, 'dispatcher', ?, ?, 1)
             RETURNING id
             """,
-            ("dispatcher", generate_password_hash("ops123!"), "Operations Desk", now),
+            ("dispatcher", generate_password_hash(DEMO_PASSWORD), "Operations Desk", now),
         ).fetchone()["id"]
 
         guard_one_id = db.execute(
             """
-            INSERT INTO users (username, password_hash, role, full_name, created_at)
-            VALUES (?, ?, 'guard', ?, ?)
+            INSERT INTO users (username, password_hash, role, full_name, created_at, is_demo)
+            VALUES (?, ?, 'guard', ?, ?, 1)
             RETURNING id
             """,
-            ("guard.alpha", generate_password_hash("ops123!"), "Guard Alpha", now),
+            ("guard.alpha", generate_password_hash(DEMO_PASSWORD), "Guard Alpha", now),
         ).fetchone()["id"]
 
         guard_two_id = db.execute(
             """
-            INSERT INTO users (username, password_hash, role, full_name, created_at)
-            VALUES (?, ?, 'guard', ?, ?)
+            INSERT INTO users (username, password_hash, role, full_name, created_at, is_demo)
+            VALUES (?, ?, 'guard', ?, ?, 1)
             RETURNING id
             """,
-            ("guard.bravo", generate_password_hash("ops123!"), "Guard Bravo", now),
+            ("guard.bravo", generate_password_hash(DEMO_PASSWORD), "Guard Bravo", now),
         ).fetchone()["id"]
 
         client_id = db.execute(
             """
-            INSERT INTO users (username, password_hash, role, full_name, created_at)
-            VALUES (?, ?, 'client', ?, ?)
+            INSERT INTO users (username, password_hash, role, full_name, created_at, is_demo)
+            VALUES (?, ?, 'client', ?, ?, 1)
             RETURNING id
             """,
-            ("client.portal", generate_password_hash("ops123!"), "Client Representative", now),
+            ("client.portal", generate_password_hash(DEMO_PASSWORD), "Client Representative", now),
         ).fetchone()["id"]
 
         site_id = db.execute(
@@ -560,11 +681,20 @@ def create_app(test_config: dict | None = None) -> Flask:
         default_db = os.path.join(app.root_path, "data", "ops_portal.db")
     default_backend = detect_db_backend(default_db)
     app.config.from_mapping(
-        SECRET_KEY=os.getenv("APP_SECRET", "ops-portal-dev-secret"),
+        SECRET_KEY=os.getenv("APP_SECRET"),
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_HOURS=os.getenv("APP_SESSION_HOURS", str(DEFAULT_SESSION_HOURS)),
+        LOGIN_SOURCE_LIMIT=os.getenv("APP_LOGIN_SOURCE_LIMIT", "0"),
+        DEMO_MODE=False,
         DATABASE=default_db,
         DB_BACKEND=default_backend,
         CHECKIN_ALERT_MINUTES=int(
             os.getenv("CHECKIN_ALERT_MINUTES", str(DEFAULT_CHECKIN_ALERT_MINUTES))
+        ),
+        CHECKIN_LATE_SYNC_MINUTES=int(
+            os.getenv("CHECKIN_LATE_SYNC_MINUTES", str(DEFAULT_CHECKIN_LATE_SYNC_MINUTES))
         ),
         OPERATIONS_BRIEF_LOOKBACK_HOURS=int(
             os.getenv(
@@ -583,11 +713,35 @@ def create_app(test_config: dict | None = None) -> Flask:
     if test_config:
         app.config.update(test_config)
 
+    secret = app.config["SECRET_KEY"]
+    if not secret or secret.strip() in {
+        "",
+        "ops-portal-dev-secret",
+        "replace-this-with-a-long-random-secret",
+        "replace-with-strong-secret",
+    }:
+        raise RuntimeError("Set APP_SECRET to a strong random session-signing secret.")
+
+    session_hours = str(app.config["SESSION_HOURS"])
+    if not re.fullmatch(r"(?:[1-9]|1[0-9]|2[0-4])", session_hours):
+        raise RuntimeError("Set APP_SESSION_HOURS to a whole number from 1 to 24.")
+    session_lifetime_seconds = int(session_hours) * 3600
+
+    source_limit_value = str(app.config["LOGIN_SOURCE_LIMIT"])
+    if not re.fullmatch(r"[0-9]{1,5}", source_limit_value) or int(source_limit_value) > 10000:
+        raise RuntimeError("Set APP_LOGIN_SOURCE_LIMIT to a whole number from 0 to 10000.")
+    source_limit = int(source_limit_value)
+    login_bucket_secret = secret if isinstance(secret, bytes) else secret.encode()
+
     app.config["DB_BACKEND"] = detect_db_backend(app.config["DATABASE"])
 
     init_db(app.config["DATABASE"], app.config["DB_BACKEND"])
     upgrade_schema(app.config["DATABASE"], app.config["DB_BACKEND"])
-    seed_data(app.config["DATABASE"], app.config["DB_BACKEND"])
+    mark_legacy_demo_users(app.config["DATABASE"], app.config["DB_BACKEND"])
+    demo_mode = app.config["DEMO_MODE"]
+    late_sync_minutes = max(1, app.config["CHECKIN_LATE_SYNC_MINUTES"])
+    if demo_mode:
+        seed_demo_data(app.config["DATABASE"], app.config["DB_BACKEND"])
 
     def get_conn() -> DbConnection:
         return DbConnection(
@@ -609,6 +763,151 @@ def create_app(test_config: dict | None = None) -> Flask:
             conn.commit()
             last_row_id = getattr(cur, "lastrowid", 0) or 0
             return int(last_row_id)
+
+    def login_bucket(kind: str, identifier: str) -> str:
+        return hmac_digest(login_bucket_secret, f"{kind}:{identifier}".encode(), "sha256").hex()
+
+    def prompt_account_password(label: str) -> str:
+        password = click.prompt(label, hide_input=True, confirmation_prompt=True)
+        if not 15 <= len(password) <= 128:
+            raise click.ClickException("Use a password of 15–128 characters.")
+        return password
+
+    @app.cli.command("provision-user")
+    @click.option("--username", required=True)
+    @click.option("--role", required=True, type=click.Choice(sorted(ALLOWED_ROLES)))
+    @click.option("--full-name", required=True)
+    def provision_user(username: str, role: str, full_name: str) -> None:
+        """Create an operator-provisioned account."""
+        username = username.strip().lower()
+        full_name = full_name.strip()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", username):
+            raise click.BadParameter("Start with a letter or digit. Use up to 64 letters, digits, dots, hyphens or underscores.", param_hint="--username")
+        if username in DEMO_PROFILES:
+            raise click.BadParameter("This username is reserved for local demos.", param_hint="--username")
+        if not full_name or "\x00" in full_name:
+            raise click.BadParameter("Enter a valid display name.", param_hint="--full-name")
+
+        password_hash = generate_password_hash(prompt_account_password("Password"))
+        with get_conn() as db:
+            user = db.execute(
+                """
+                INSERT INTO users (username, password_hash, role, full_name, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (username) DO NOTHING
+                RETURNING id
+                """,
+                (username, password_hash, role, full_name, utc_now_iso()),
+            ).fetchone()
+            if user is None:
+                raise click.ClickException("That username already exists.")
+        click.echo(f"Created {role} account {username}.")
+
+    @app.cli.command("reset-user-password")
+    @click.argument("username")
+    def reset_user_password(username: str) -> None:
+        """Set a new password and revoke sessions for a provisioned account."""
+        username = username.strip().lower()
+        account = fetch_one(
+            "SELECT id, password_hash FROM users WHERE username = ? AND is_demo = 0",
+            (username,),
+        )
+        if account is None:
+            raise click.ClickException("Choose a provisioned account.")
+
+        password = prompt_account_password("New password")
+        if check_password_hash(account["password_hash"], password):
+            raise click.ClickException("Choose a password different from the current password.")
+        password_hash = generate_password_hash(password)
+        with get_conn() as db:
+            updated = db.execute(
+                """
+                UPDATE users SET password_hash = ?
+                WHERE id = ? AND password_hash = ? AND is_demo = 0
+                RETURNING id
+                """,
+                (password_hash, account["id"], account["password_hash"]),
+            ).fetchone()
+            if updated is None:
+                raise click.ClickException("The account changed during the reset. Run the command again.")
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (updated["id"],))
+            db.execute("DELETE FROM login_attempts WHERE bucket = ?", (login_bucket("username", username),))
+        click.echo(f"Password reset for {username}. All existing sessions were revoked.")
+
+    @app.cli.command("set-user-access")
+    @click.argument("username")
+    @click.argument("access", type=click.Choice(("enabled", "disabled")))
+    def set_user_access(username: str, access: str) -> None:
+        """Enable or disable a provisioned account."""
+        username = username.strip().lower()
+        disabled = access == "disabled"
+        with get_conn() as db:
+            user = db.execute(
+                """
+                UPDATE users
+                SET disabled_at = CASE WHEN ? THEN COALESCE(disabled_at, ?) ELSE NULL END
+                WHERE username = ? AND is_demo = 0
+                RETURNING id
+                """,
+                (disabled, utc_now_iso(), username),
+            ).fetchone()
+            if user is None:
+                raise click.ClickException("Choose a provisioned account.")
+            if disabled:
+                db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user["id"],))
+        click.echo(f"Access for {username} is {access}.")
+
+    @app.cli.command("provision-site")
+    @click.option("--name", required=True)
+    @click.option("--client", help="Username of a provisioned client account.")
+    def provision_site(name: str, client: str | None) -> None:
+        """Create a site or link an existing site to a client."""
+        name = name.strip()
+        if not name or "\x00" in name:
+            raise click.BadParameter("Enter a valid site name.", param_hint="--name")
+
+        with get_conn() as db:
+            client_id = None
+            if client is not None:
+                if app.config["DB_BACKEND"] == "sqlite":
+                    db.execute("BEGIN IMMEDIATE")
+                    lock = ""
+                else:
+                    lock = " FOR UPDATE"
+                user = db.execute(
+                    "SELECT id FROM users WHERE username = ? AND role = 'client' AND is_demo = 0 AND disabled_at IS NULL" + lock,
+                    (client.strip().lower(),),
+                ).fetchone()
+                if user is None:
+                    raise click.ClickException("Choose a provisioned client account with access enabled.")
+                client_id = user["id"]
+                other_site = db.execute(
+                    "SELECT id FROM sites WHERE client_user_id = ? AND name <> ? LIMIT 1",
+                    (client_id, name),
+                ).fetchone()
+                if other_site is not None:
+                    raise click.ClickException("That client account is already linked to another site.")
+
+            db.execute(
+                """
+                INSERT INTO sites (name, client_user_id, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (name) DO NOTHING
+                """,
+                (name, client_id, utc_now_iso()),
+            )
+            if client_id is not None:
+                linked_site = db.execute(
+                    """
+                    UPDATE sites SET client_user_id = ?
+                    WHERE name = ? AND (client_user_id IS NULL OR client_user_id = ?)
+                    RETURNING id
+                    """,
+                    (client_id, name, client_id),
+                ).fetchone()
+                if linked_site is None:
+                    raise click.ClickException("That site is already linked to another client.")
+        click.echo(f"Site {name} is ready.")
 
     def fetch_client_site(client_user_id: int):
         return fetch_one(
@@ -780,13 +1079,13 @@ def create_app(test_config: dict | None = None) -> Flask:
             JOIN users u ON u.id = a.guard_user_id
             JOIN sites s ON s.id = a.site_id
             LEFT JOIN (
-                SELECT c1.assignment_id, c1.check_type, c1.created_at
-                FROM checkins c1
-                INNER JOIN (
-                    SELECT assignment_id, MAX(id) AS max_id
+                SELECT assignment_id, check_type, created_at
+                FROM (
+                    SELECT assignment_id, check_type, created_at,
+                           ROW_NUMBER() OVER (PARTITION BY assignment_id ORDER BY created_at DESC, id DESC) AS position
                     FROM checkins
-                    GROUP BY assignment_id
-                ) latest_check ON latest_check.max_id = c1.id
+                ) ranked
+                WHERE position = 1
             ) AS last_check ON last_check.assignment_id = a.id
             WHERE a.status = 'active'
             ORDER BY a.shift_start ASC
@@ -875,13 +1174,13 @@ def create_app(test_config: dict | None = None) -> Flask:
                 GROUP BY guard_user_id
             ) AS recent_incidents ON recent_incidents.guard_user_id = u.id
             LEFT JOIN (
-                SELECT c1.guard_user_id, c1.check_type, c1.created_at
-                FROM checkins c1
-                INNER JOIN (
-                    SELECT guard_user_id, MAX(id) AS max_id
+                SELECT guard_user_id, check_type, created_at
+                FROM (
+                    SELECT guard_user_id, check_type, created_at,
+                           ROW_NUMBER() OVER (PARTITION BY guard_user_id ORDER BY created_at DESC, id DESC) AS position
                     FROM checkins
-                    GROUP BY guard_user_id
-                ) latest ON latest.max_id = c1.id
+                ) ranked
+                WHERE position = 1
             ) AS last_check ON last_check.guard_user_id = u.id
             WHERE u.role = 'guard'
             ORDER BY u.full_name ASC
@@ -1169,20 +1468,116 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @app.before_request
     def load_logged_in_user() -> None:
-        user_id = session.get("user_id")
-        if user_id is None:
-            g.user = None
+        g.user = None
+        g.auth_session_digest = None
+        token = session.get("auth_token")
+        if not token:
+            if "user_id" in session:
+                session.clear()
             return
+
+        token_digest = sha256(token.encode()).hexdigest()
         g.user = fetch_one(
-            "SELECT id, username, role, full_name FROM users WHERE id = ?",
-            (user_id,),
+            """
+            SELECT u.id, u.username, u.role, u.full_name
+            FROM auth_sessions a JOIN users u ON u.id = a.user_id
+            WHERE a.token_digest = ? AND a.expires_at > ?
+              AND u.disabled_at IS NULL AND (u.is_demo = 0 OR ?)
+            """,
+            (token_digest, int(time()), demo_mode),
         )
         if g.user is None:
             session.clear()
+        else:
+            g.auth_session_digest = token_digest
+
+    @app.template_global()
+    def csrf_token() -> str:
+        if "csrf_token" not in session:
+            session["csrf_token"] = secrets.token_urlsafe(32)
+        return session["csrf_token"]
+
+    @app.before_request
+    def protect_form_submissions() -> None:
+        if request.method != "POST" or request.endpoint is None:
+            return
+        expected = session.get("csrf_token")
+        supplied = request.form.get("csrf_token", "")
+        if not expected or not secrets.compare_digest(expected.encode(), supplied.encode()):
+            abort(400, description="Invalid form token. Reload the page and try again.")
+
+    @app.after_request
+    def prevent_form_caching(response):
+        if getattr(g, "user", None) is not None or "csrf_token" in session:
+            response.cache_control.no_store = True
+        return response
 
     @app.get("/health")
     def health() -> tuple[dict[str, str], int]:
         return {"status": "ok", "service": "omega-guard-ops-portal"}, 200
+
+    def reserve_login_attempts(username: str):
+        buckets = []
+        if source_limit and request.remote_addr:
+            buckets.append((login_bucket("source", request.remote_addr), source_limit))
+        buckets.append((login_bucket("username", username), LOGIN_ACCOUNT_LIMIT))
+
+        now = int(time())
+        reservations = []
+        with get_conn() as db:
+            db.execute("DELETE FROM login_attempts WHERE expires_at <= ?", (now,))
+            for bucket, limit in buckets:
+                reserved = db.execute(
+                    """
+                    INSERT INTO login_attempts (bucket, attempts, expires_at)
+                    VALUES (?, 1, ?)
+                    ON CONFLICT (bucket) DO UPDATE SET attempts = login_attempts.attempts + 1
+                    WHERE login_attempts.attempts < ?
+                    RETURNING expires_at
+                    """,
+                    (bucket, now + LOGIN_WINDOW_SECONDS, limit),
+                ).fetchone()
+                if reserved is None:
+                    blocked = db.execute(
+                        "SELECT expires_at FROM login_attempts WHERE bucket = ?", (bucket,)
+                    ).fetchone()
+                    return [], max(1, blocked["expires_at"] - now)
+                reservations.append((bucket, reserved["expires_at"]))
+        return reservations, None
+
+    def issue_auth_session(user, login_reservations):
+        token = secrets.token_urlsafe(32)
+        with get_conn() as db:
+            # Serialize session creation with account changes, after checking the password.
+            lock = " FOR UPDATE" if app.config["DB_BACKEND"] == "postgres" else ""
+            if not lock:
+                db.execute("BEGIN IMMEDIATE")
+            active = db.execute(
+                """
+                SELECT id FROM users WHERE id = ? AND password_hash = ?
+                  AND disabled_at IS NULL AND (is_demo = 0 OR ?)
+                """ + lock,
+                (user["id"], user["password_hash"], demo_mode),
+            ).fetchone()
+            if active is None:
+                return None
+            now = int(time())
+            db.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now,))
+            if g.auth_session_digest is not None:
+                db.execute("DELETE FROM auth_sessions WHERE token_digest = ?", (g.auth_session_digest,))
+            db.execute(
+                "INSERT INTO auth_sessions (token_digest, user_id, expires_at) VALUES (?, ?, ?)",
+                (sha256(token.encode()).hexdigest(), user["id"], now + session_lifetime_seconds),
+            )
+            for bucket, expires_at in login_reservations:
+                db.execute(
+                    """
+                    UPDATE login_attempts SET attempts = attempts - 1
+                    WHERE bucket = ? AND expires_at = ? AND attempts > 0
+                    """,
+                    (bucket, expires_at),
+                )
+        return token
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -1190,16 +1585,29 @@ def create_app(test_config: dict | None = None) -> Flask:
             username = (request.form.get("username") or "").strip().lower()
             password = request.form.get("password") or ""
 
+            reservations, retry_after = reserve_login_attempts(username)
+            if retry_after is not None:
+                flash("Too many sign-in attempts. Wait a few minutes and try again.", "error")
+                response = make_response(render_template("login.html"), 429)
+                response.headers["Retry-After"] = str(retry_after)
+                return response
+
             user = fetch_one(
-                "SELECT id, username, password_hash, role FROM users WHERE username = ?",
-                (username,),
+                """
+                SELECT id, password_hash FROM users
+                WHERE username = ? AND disabled_at IS NULL AND (is_demo = 0 OR ?)
+                """,
+                (username, demo_mode),
             )
-            if user is None or not check_password_hash(user["password_hash"], password):
+            token = None
+            if user is not None and check_password_hash(user["password_hash"], password):
+                token = issue_auth_session(user, reservations)
+            if token is None:
                 flash("Invalid username or password.", "error")
                 return render_template("login.html")
 
             session.clear()
-            session["user_id"] = int(user["id"])
+            session["auth_token"] = token
             flash("Signed in.", "success")
             return redirect(url_for("dashboard"))
 
@@ -1210,6 +1618,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.post("/logout")
     @login_required
     def logout():
+        execute("DELETE FROM auth_sessions WHERE token_digest = ?", (g.auth_session_digest,))
         session.clear()
         flash("Signed out.", "success")
         return redirect(url_for("login"))
@@ -1231,13 +1640,13 @@ def create_app(test_config: dict | None = None) -> Flask:
                        COALESCE(last_assignment.status, 'unassigned') AS assignment_status
                 FROM users u
                 LEFT JOIN (
-                    SELECT c1.guard_user_id, c1.check_type, c1.created_at
-                    FROM checkins c1
-                    INNER JOIN (
-                        SELECT guard_user_id, MAX(id) AS max_id
+                    SELECT guard_user_id, check_type, created_at
+                    FROM (
+                        SELECT guard_user_id, check_type, created_at,
+                               ROW_NUMBER() OVER (PARTITION BY guard_user_id ORDER BY created_at DESC, id DESC) AS position
                         FROM checkins
-                        GROUP BY guard_user_id
-                    ) latest ON latest.max_id = c1.id
+                    ) ranked
+                    WHERE position = 1
                 ) AS last_check ON last_check.guard_user_id = u.id
                 LEFT JOIN (
                     SELECT a1.guard_user_id, a1.site_id, a1.status
@@ -1353,7 +1762,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 """
                 SELECT id, full_name, username
                 FROM users
-                WHERE role = 'guard'
+                WHERE role = 'guard' AND disabled_at IS NULL
                 ORDER BY full_name ASC
                 """
             )
@@ -1364,8 +1773,13 @@ def create_app(test_config: dict | None = None) -> Flask:
             patrol_alerts = ops_brief["patrol_alerts"]
             open_patrol_alerts = ops_brief["open_patrol_alerts"]
 
+            review_checkins, pending_review_count = pending_checkin_review()
             return render_template(
                 "dashboard_dispatcher.html",
+                received_checkins=recent_checkin_receipts(),
+                review_checkins=review_checkins,
+                pending_review_count=pending_review_count,
+                late_sync_minutes=late_sync_minutes,
                 guards=guards,
                 incidents=incidents,
                 assignments=assignments,
@@ -1977,6 +2391,13 @@ def create_app(test_config: dict | None = None) -> Flask:
             return redirect(url_for("dashboard"))
 
         with get_conn() as conn:
+            guard_row = conn.execute(
+                "SELECT id FROM users WHERE id = ? AND role = 'guard' AND disabled_at IS NULL", (guard_user_id,)
+            ).fetchone()
+            if guard_row is None:
+                flash("Select a guard with access enabled.", "error")
+                return redirect(url_for("dashboard"))
+
             if new_site_name:
                 existing_site = conn.execute(
                     "SELECT id FROM sites WHERE LOWER(name) = LOWER(?)", (new_site_name,)
@@ -1997,13 +2418,6 @@ def create_app(test_config: dict | None = None) -> Flask:
                     flash("Selected site does not exist.", "error")
                     return redirect(url_for("dashboard"))
                 site_id_value = site_row["id"]
-
-            guard_row = conn.execute(
-                "SELECT id FROM users WHERE id = ? AND role = 'guard'", (guard_user_id,)
-            ).fetchone()
-            if guard_row is None:
-                flash("Selected guard is invalid.", "error")
-                return redirect(url_for("dashboard"))
 
             conn.execute(
                 """
@@ -2347,19 +2761,20 @@ def create_app(test_config: dict | None = None) -> Flask:
 
                 guard = conn.execute(
                     """
-                    SELECT id
+                    SELECT id, disabled_at
                     FROM users
                     WHERE role = 'guard'
                       AND (LOWER(username) = LOWER(?) OR LOWER(full_name) = LOWER(?))
+                    ORDER BY CASE WHEN LOWER(username) = LOWER(?) THEN 0 ELSE 1 END, id
                     LIMIT 1
                     """,
-                    (guard_identifier, guard_identifier),
+                    (guard_identifier, guard_identifier, guard_identifier),
                 ).fetchone()
-                if guard is None:
+                if guard is None or guard["disabled_at"] is not None:
                     record_skip(
                         "guard_not_found",
                         row_number,
-                        f"unknown guard '{guard_identifier}'",
+                        f"guard '{guard_identifier}' is unknown or disabled",
                     )
                     continue
 
@@ -2497,55 +2912,122 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
         return redirect(url_for("dashboard"))
 
+    def record_checkin(guard_id, assignment_id, check_type, note, captured_at, event_id=None):
+        received_at = utc_now_iso()
+        with get_conn() as db:
+            if app.config["DB_BACKEND"] == "sqlite":
+                db.execute("BEGIN IMMEDIATE")
+                lock = ""
+            else:
+                lock = " FOR UPDATE"
+            assignment = db.execute(
+                "SELECT id FROM assignments WHERE id = ? AND guard_user_id = ?" + lock,
+                (assignment_id, guard_id),
+            ).fetchone()
+            if assignment is None:
+                return None, "Assignment not found for your user.", 404
+
+            checkin = db.execute(
+                """
+                INSERT INTO checkins
+                    (assignment_id, guard_user_id, check_type, note, created_at, client_event_id, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (guard_user_id, client_event_id) DO NOTHING
+                RETURNING id, synced_at
+                """,
+                (assignment_id, guard_id, check_type, note, captured_at, event_id,
+                 received_at if event_id else None),
+            ).fetchone()
+            if checkin is None:
+                previous = db.execute(
+                    """
+                    SELECT id, assignment_id, check_type, note, created_at, synced_at
+                    FROM checkins WHERE guard_user_id = ? AND client_event_id = ?
+                    """,
+                    (guard_id, event_id),
+                ).fetchone()
+                original = (previous["assignment_id"], previous["check_type"],
+                            previous["note"], previous["created_at"])
+                if original != (assignment_id, check_type, note, captured_at):
+                    return None, "This check-in ID was already used for a different entry.", 409
+                return previous, None, 200
+
+            if check_type in {"IN", "OUT"}:
+                latest = db.execute(
+                    """
+                    SELECT id FROM checkins
+                    WHERE assignment_id = ? AND check_type IN ('IN', 'OUT')
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                    """,
+                    (assignment_id,),
+                ).fetchone()
+                if latest["id"] == checkin["id"]:
+                    db.execute(
+                        "UPDATE assignments SET status = ? WHERE id = ?",
+                        ("active" if check_type == "IN" else "completed", assignment_id),
+                    )
+            db.commit()
+            return checkin, None, 201
+
+    def checkin_form_fields():
+        assignment_id = request.form.get("assignment_id", "").strip()
+        check_type = request.form.get("check_type", "").strip().upper()
+        note = request.form.get("note", "").strip()
+        if not re.fullmatch(r"[0-9]{1,19}", assignment_id) or not 0 < int(assignment_id) < 2**63:
+            return None, "Select a valid assignment."
+        if check_type not in ALLOWED_CHECKIN_TYPES:
+            return None, "Invalid check-in type."
+        if len(note) > 2000 or "\x00" in note:
+            return None, "Use a note of 2,000 characters or fewer with no null characters."
+        return (int(assignment_id), check_type, note), None
+
     @app.post("/guard/checkins")
     @roles_required("guard")
     def guard_checkin():
-        assert g.user is not None
-        assignment_id = (request.form.get("assignment_id") or "").strip()
-        check_type = (request.form.get("check_type") or "").strip().upper()
-        note = (request.form.get("note") or "").strip()
-
-        if not assignment_id:
-            flash("Select an assignment.", "error")
-            return redirect(url_for("dashboard"))
-        if check_type not in ALLOWED_CHECKIN_TYPES:
-            flash("Invalid check-in type.", "error")
-            return redirect(url_for("dashboard"))
-
-        assignment = fetch_one(
-            """
-            SELECT id, status
-            FROM assignments
-            WHERE id = ? AND guard_user_id = ?
-            """,
-            (assignment_id, g.user["id"]),
-        )
-        if assignment is None:
-            flash("Assignment not found for your user.", "error")
-            return redirect(url_for("dashboard"))
-
-        execute(
-            """
-            INSERT INTO checkins (assignment_id, guard_user_id, check_type, note, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (assignment_id, g.user["id"], check_type, note, utc_now_iso()),
-        )
-
-        next_status = None
-        if check_type == "IN":
-            next_status = "active"
-        elif check_type == "OUT":
-            next_status = "completed"
-
-        if next_status is not None:
-            execute(
-                "UPDATE assignments SET status = ? WHERE id = ?",
-                (next_status, assignment_id),
-            )
-
-        flash("Check-in recorded.", "success")
+        fields, error = checkin_form_fields()
+        if fields is not None:
+            _, error, _ = record_checkin(g.user["id"], *fields, utc_now_iso())
+        flash(error or "Check-in recorded.", "error" if error else "success")
         return redirect(url_for("dashboard"))
+
+    @app.get("/guard/checkins/offline")
+    def offline_checkins():
+        return app.send_static_file("offline-checkins.html")
+
+    @app.get("/guard/checkins/worker.js")
+    def checkin_worker():
+        return app.send_static_file("checkin-worker.js")
+
+    @app.get("/guard/checkins/session")
+    @roles_required("guard")
+    def checkin_sync_session():
+        return jsonify(guard_id=str(g.user["id"]), csrf_token=csrf_token())
+
+    @app.post("/guard/checkins/sync")
+    @roles_required("guard")
+    def sync_checkin():
+        if request.form.get("guard_id") != str(g.user["id"]):
+            return jsonify(error="Sign in with the guard account that saved this check-in."), 403
+        fields, error = checkin_form_fields()
+        if fields is None:
+            return jsonify(error=error), 422
+        try:
+            event_id = str(UUID(request.form.get("event_id", "")))
+            timestamp = request.form.get("captured_at", "")
+            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z", timestamp):
+                raise ValueError("Invalid capture timestamp")
+            captured = parse_iso_to_utc(timestamp)
+        except ValueError:
+            return jsonify(error="Invalid check-in ID or capture time."), 422
+        if captured is None or captured > datetime.now(timezone.utc) + timedelta(minutes=5):
+            return jsonify(error="Check the device clock. Capture time is invalid or in the future."), 422
+
+        checkin, error, status = record_checkin(
+            g.user["id"], *fields, to_utc_iso(captured), event_id
+        )
+        if error:
+            return jsonify(error=error), status
+        return jsonify(event_id=event_id, checkin_id=checkin["id"], synced_at=checkin["synced_at"]), status
 
     @app.post("/guard/incidents")
     @roles_required("guard")
@@ -2599,6 +3081,99 @@ def create_app(test_config: dict | None = None) -> Flask:
         flash("Incident submitted to dispatch.", "success")
         return redirect(url_for("dashboard"))
 
+    def late_sync_delay_minutes(receipt):
+        captured = parse_iso_to_utc(receipt["created_at"])
+        synced = parse_iso_to_utc(receipt["synced_at"])
+        if captured is None or synced is None:
+            return None
+        delay = synced - captured
+        if delay < timedelta(minutes=late_sync_minutes):
+            return None
+        return int(delay.total_seconds()) // 60
+
+    def recent_checkin_receipts():
+        rows = fetch_all(
+            """
+            SELECT c.id, c.assignment_id, c.check_type, c.created_at, c.synced_at,
+                   u.full_name AS guard_name, s.name AS site_name,
+                   c.acknowledged_at, dispatcher.full_name AS acknowledged_by
+            FROM checkins c
+            JOIN users u ON u.id = c.guard_user_id
+            JOIN assignments a ON a.id = c.assignment_id
+            JOIN sites s ON s.id = a.site_id
+            LEFT JOIN users dispatcher ON dispatcher.id = c.acknowledged_by
+            ORDER BY COALESCE(c.synced_at, c.created_at) DESC, c.id DESC
+            LIMIT 30
+            """
+        )
+        return [{**dict(row), "late_minutes": late_sync_delay_minutes(row)} for row in rows]
+
+    def pending_checkin_review():
+        if app.config["DB_BACKEND"] == "postgres":
+            delay = "EXTRACT(EPOCH FROM (CAST(c.synced_at AS timestamptz) - CAST(c.created_at AS timestamptz)))"
+        else:
+            delay = "CAST(strftime('%s', c.synced_at) AS INTEGER) - CAST(strftime('%s', c.created_at) AS INTEGER)"
+        rows = fetch_all(
+            f"""
+            SELECT c.id, c.assignment_id, c.check_type, c.created_at, c.synced_at,
+                   u.full_name AS guard_name, s.name AS site_name,
+                   c.acknowledged_at, COUNT(*) OVER () AS pending_count
+            FROM checkins c
+            JOIN users u ON u.id = c.guard_user_id
+            JOIN assignments a ON a.id = c.assignment_id
+            JOIN sites s ON s.id = a.site_id
+            WHERE c.acknowledged_at IS NULL
+              AND CASE WHEN c.synced_at IS NOT NULL THEN ({delay}) >= ? ELSE FALSE END
+            ORDER BY c.synced_at, c.id
+            LIMIT 30
+            """,
+            (late_sync_minutes * 60,),
+        )
+        count = rows[0]["pending_count"] if rows else 0
+        return [{**dict(row), "late_minutes": late_sync_delay_minutes(row)} for row in rows], count
+
+    @app.get("/dispatcher/checkin-receipts")
+    @roles_required("dispatcher")
+    def checkin_receipts():
+        markup = render_template("_checkin_receipt_rows.html", received_checkins=recent_checkin_receipts())
+        if request.args.get("include_review") == "1":
+            review_checkins, pending_count = pending_checkin_review()
+            response = jsonify(
+                receipts=markup,
+                review=render_template("_checkin_receipt_rows.html", received_checkins=review_checkins, review_queue=True),
+                pending_count=pending_count,
+            )
+        else:
+            response = make_response(markup)
+        response.cache_control.no_store = True
+        return response
+
+    @app.post("/dispatcher/checkin-receipts/<int:checkin_id>/ack")
+    @roles_required("dispatcher")
+    def acknowledge_checkin_receipt(checkin_id):
+        if not 0 < checkin_id < 2**63:
+            abort(404)
+        receipt = fetch_one(
+            "SELECT created_at, synced_at, acknowledged_at FROM checkins WHERE id = ?",
+            (checkin_id,),
+        )
+        if receipt is None:
+            abort(404)
+        if receipt["acknowledged_at"] is None:
+            if late_sync_delay_minutes(receipt) is None:
+                abort(409, description="Only late check-ins can be acknowledged.")
+            execute(
+                """
+                UPDATE checkins SET acknowledged_at = ?, acknowledged_by = ?
+                WHERE id = ? AND acknowledged_at IS NULL
+                """,
+                (utc_now_iso(), g.user["id"], checkin_id),
+            )
+
+        if request.accept_mimetypes.best == "application/json":
+            return "", 204
+        return redirect(url_for("dashboard", _anchor="checkin-receipts"), code=303)
+
     @app.get("/api/status")
     @roles_required("dispatcher")
     def status_api():
@@ -2623,7 +3198,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 SELECT id
                 FROM checkins
                 WHERE guard_user_id = u.id
-                ORDER BY id DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT 1
             )
             WHERE u.role = 'guard'
@@ -2635,8 +3210,17 @@ def create_app(test_config: dict | None = None) -> Flask:
     return app
 
 
-app = create_app()
-
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    local_demo = os.getenv("APP_DEMO_MODE") == "1"
+    if local_demo and (os.getenv("DATABASE_URL") or "").strip():
+        raise RuntimeError("Clear DATABASE_URL before starting the local demo.")
+    local_config = {"SESSION_COOKIE_SECURE": False}
+    if local_demo:
+        local_config.update(
+            DEMO_MODE=True,
+            DATABASE=os.path.join(os.path.dirname(__file__), "data", "demo.db"),
+        )
+    app = create_app(local_config)
+    app.run(host="127.0.0.1", port=8000)
+else:
+    app = create_app()

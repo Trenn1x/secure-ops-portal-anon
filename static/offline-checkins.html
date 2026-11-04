@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Omega Guard Ops · Offline Check-Ins</title>
+<style>
+  body { font: 1rem system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin-bottom: 1rem; }
+  input, select, button { display: block; max-width: 100%; font: inherit; padding: .5rem; }
+  fieldset { margin: 0; border: 0; padding: 0; }
+</style>
+<h1>Offline Check-Ins</h1>
+<p>This page uses the assignments saved from the guard dashboard. Check-ins sync when the server is reachable and your guard session is active.</p>
+<p><a href="/">Return to the guard dashboard</a></p>
+<form hidden data-checkin-queue data-session-url="/guard/checkins/session" data-sync-url="/guard/checkins/sync">
+  <fieldset disabled>
+    <label>Assignment
+      <select name="assignment_id" required>
+        <option value="">Select assignment</option>
+      </select>
+    </label>
+    <label>Type
+      <select name="check_type" required>
+        <option value="IN">IN</option>
+        <option value="PATROL">PATROL</option>
+        <option value="OUT">OUT</option>
+      </select>
+    </label>
+    <label>Note <input type="text" name="note" maxlength="2000"></label>
+    <button type="submit">Save Check-In</button>
+  </fieldset>
+</form>
+<div id="checkin-queue">
+  <p id="checkin-sync-status" role="status">Loading offline access. This page requires browser storage and a secure connection.</p>
+  <ul id="checkin-sync-errors"></ul>
+  <button id="checkin-sync-now" type="button" disabled>Sync now</button>
+</div>
+<script defer src="/static/checkin-queue.js"></script>
+</html>
