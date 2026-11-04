@@ -57,7 +57,7 @@ def post_form(web, path, *, data=None, **kwargs):
     return web.post(path, data={**(data or {}), "csrf_token": token}, **kwargs)
 
 
-def test_postgres_checkin_workflow_smoke():
+def test_postgres_checkin_workflow_smoke(tmp_path, monkeypatch):
     database_url = os.getenv("OMEGA_TEST_POSTGRES_URL")
     if not database_url:
         pytest.skip("Set OMEGA_TEST_POSTGRES_URL to a fresh disposable PostgreSQL database.")
@@ -69,6 +69,7 @@ def test_postgres_checkin_workflow_smoke():
         "CHECKIN_LATE_SYNC_MINUTES": 5,
     })
     assert app.config["DB_BACKEND"] == "postgres"
+    assert app.test_client().get("/ready").status_code == 200
     runner = app.test_cli_runner()
     password = "disposable smoke test passphrase"
     for role in ("dispatcher", "guard"):
@@ -117,6 +118,28 @@ def test_postgres_checkin_workflow_smoke():
     )
     assert acknowledged.status_code == 204
     assert dispatch.get(receipts).json["pending_count"] == 0
+
+    with monkeypatch.context() as outage:
+        outage.setitem(app.config, "DATABASE", f"postgresql:///omega_ci?host={tmp_path}")
+        assert dispatch.get("/health").status_code == 200
+        response = dispatch.get("/ready")
+        assert response.status_code == 503
+        assert response.json == {"status": "database_unavailable"}
+        assert response.cache_control.no_store
+    assert dispatch.get("/ready").status_code == 200
+    assert dispatch.get("/api/status").status_code == 200
+
+
+def test_sqlite_readiness_does_not_create_missing_database(client, tmp_path, monkeypatch):
+    web, _ = client
+    assert web.get("/ready").json == {"status": "ready"}
+    missing = tmp_path / "missing.db"
+    monkeypatch.setitem(web.application.config, "DATABASE", str(missing))
+
+    response = web.get("/ready")
+    assert response.status_code == 503
+    assert response.json == {"status": "database_unavailable"}
+    assert not missing.exists()
 
 
 def test_operator_can_provision_a_fresh_production_database(tmp_path):
