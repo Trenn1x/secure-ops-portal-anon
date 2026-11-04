@@ -56,6 +56,68 @@ def post_form(web, path, *, data=None, **kwargs):
     return web.post(path, data={**(data or {}), "csrf_token": token}, **kwargs)
 
 
+def test_postgres_checkin_workflow_smoke():
+    database_url = os.getenv("OMEGA_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("Set OMEGA_TEST_POSTGRES_URL to a fresh disposable PostgreSQL database.")
+
+    app = create_app({
+        "TESTING": True,
+        "DATABASE": database_url,
+        "SECRET_KEY": "postgres-smoke-test-secret",
+        "CHECKIN_LATE_SYNC_MINUTES": 5,
+    })
+    assert app.config["DB_BACKEND"] == "postgres"
+    runner = app.test_cli_runner()
+    password = "disposable smoke test passphrase"
+    for role in ("dispatcher", "guard"):
+        result = runner.invoke(
+            args=["provision-user", "--username", f"smoke.{role}", "--role", role, "--full-name", f"Smoke {role}"],
+            input=f"{password}\n{password}\n",
+        )
+        assert result.exit_code == 0, result.output
+
+    dispatch, guard = app.test_client(), app.test_client()
+    assert b"Dispatcher Workspace" in login(dispatch, "smoke.dispatcher", password).data
+    assert b"Guard Workspace" in login(guard, "smoke.guard", password).data
+    guard_id = guard.get("/guard/checkins/session").json["guard_id"]
+    now = datetime.now(timezone.utc)
+    assignment = post_form(
+        dispatch, "/dispatcher/assignments", follow_redirects=True,
+        data={
+            "guard_user_id": guard_id,
+            "new_site_name": "PostgreSQL Smoke Site",
+            "shift_start": (now - timedelta(minutes=30)).isoformat(),
+            "shift_end": (now + timedelta(hours=7)).isoformat(),
+        },
+    )
+    assert b"Shift assignment created." in assignment.data
+    option = re.search(rb'<option value="(\d+)">#\d+ PostgreSQL Smoke Site', guard.get("/").data)
+    assert option is not None
+
+    event = {
+        "guard_id": guard_id,
+        "assignment_id": option.group(1).decode(),
+        "check_type": "IN",
+        "event_id": str(uuid4()),
+        "captured_at": (now - timedelta(minutes=10)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    }
+    first = post_form(guard, "/guard/checkins/sync", data=event)
+    assert first.status_code == 201, first.data
+    retry = post_form(guard, "/guard/checkins/sync", data=event)
+    assert retry.status_code == 200
+    assert retry.json == first.json
+
+    receipts = "/dispatcher/checkin-receipts?include_review=1"
+    assert dispatch.get(receipts).json["pending_count"] == 1
+    acknowledged = post_form(
+        dispatch, f"/dispatcher/checkin-receipts/{first.json['checkin_id']}/ack",
+        headers={"Accept": "application/json"},
+    )
+    assert acknowledged.status_code == 204
+    assert dispatch.get(receipts).json["pending_count"] == 0
+
+
 def test_operator_can_provision_a_fresh_production_database(tmp_path):
     database = tmp_path / "production.db"
     app = create_app({"DATABASE": str(database), "SECRET_KEY": "test-secret"})

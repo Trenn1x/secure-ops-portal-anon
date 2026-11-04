@@ -13,6 +13,20 @@ jobs:
     name: Tests and container smoke check
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: omega_ci
+          POSTGRES_PASSWORD: omega_ci
+          POSTGRES_DB: omega_ci
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U omega_ci -d omega_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,6 +42,10 @@ jobs:
           for script in static/*.js; do
             node --check "$script"
           done
+      - name: Check PostgreSQL workflows
+        env:
+          OMEGA_TEST_POSTGRES_URL: postgresql://omega_ci:omega_ci@127.0.0.1:${{ job.services.postgres.ports[5432] }}/omega_ci
+        run: python -m pytest -q tests/test_app.py::test_postgres_checkin_workflow_smoke
       - name: Build production image
         run: docker build --tag omega-guard-ops:ci .
       - name: Check production startup
