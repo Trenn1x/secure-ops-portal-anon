@@ -1,3 +1,4 @@
+import csv
 import io
 import os
 import re
@@ -805,6 +806,60 @@ def test_client_can_download_report_package(client):
     assert "Client Site A" in summary_text
     assert "Perimeter access hardware issue" in incidents_csv
     assert "Security team identified an access hardware issue" in updates_csv
+
+
+def test_report_csv_exports_neutralize_formula_text(client):
+    web, db_path = client
+    title = " \ufeff'=HYPERLINK(\"https://example.invalid\", \"Open\")"
+    details = "＋1+1"
+    message = "\t@SUM(1,2)"
+    internal_note = "-1+2"
+    site_name = "Gate;=1+1"
+    older = (datetime.now(timezone.utc) - timedelta(minutes=80)).isoformat()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE sites SET name = ?", (site_name,))
+        conn.execute(
+            "UPDATE incidents SET title = ?, details = ?, severity = 'high', created_at = ?, updated_at = ?",
+            (title, details, older, older),
+        )
+        conn.execute("UPDATE updates SET message = ? WHERE audience = 'client'", (message,))
+        conn.execute(
+            """
+            INSERT INTO updates (site_id, author_user_id, audience, message, created_at)
+            SELECT sites.id, users.id, 'internal', ?, ?
+            FROM sites CROSS JOIN users WHERE users.role = 'dispatcher'
+            """,
+            (internal_note, older),
+        )
+
+    def exported_rows(url, name):
+        response = web.get(url)
+        assert response.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+            raw = archive.read(name).decode("utf-8")
+        return list(csv.DictReader(io.StringIO(raw, newline=""))), raw
+
+    login(web, "client.portal", "ops123!")
+    client_package = "/client/exports/site-package"
+    incidents, _ = exported_rows(client_package, "incident_visibility.csv")
+    assert incidents[0]["title"] == f"[text] {title}"
+    assert incidents[0]["details"] == f"[text] {details}"
+    updates, _ = exported_rows(client_package, "client_updates.csv")
+    assert updates[0]["message"] == f"[text] {message}"
+
+    post_form(web, "/logout")
+    login(web, "dispatcher", "ops123!")
+    ops, raw = exported_rows("/dispatcher/exports/operations-brief", "incidents_watchlist.csv")
+    assert ops[0]["title"] == f"[text] {title}"
+    assert ops[0]["site_name"] == site_name
+    assert f'"{site_name}"' in raw
+    assert int(ops[0]["minutes_to_breach"]) < 0
+    handoff, _ = exported_rows("/dispatcher/exports/shift-handoff", "internal_updates.csv")
+    assert any(row["message"] == f"[text] {internal_note}" for row in handoff)
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT title, details FROM incidents").fetchone() == (title, details)
 
 
 def test_dispatcher_can_download_operations_brief_package(client):

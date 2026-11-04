@@ -11,6 +11,7 @@ from functools import wraps
 from hashlib import sha256
 from hmac import digest as hmac_digest
 from time import time
+from unicodedata import category, normalize
 from uuid import UUID
 
 import click
@@ -165,6 +166,28 @@ def pick_csv_value(row: dict[str, str], names: list[str]) -> str:
 def safe_filename_fragment(value: str, fallback: str = "site") -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
     return cleaned or fallback
+
+
+def spreadsheet_cell(value):
+    if not isinstance(value, str):
+        return value
+
+    for char in value:
+        normalized = normalize("NFKC", char)
+        if normalized in {"=", "+", "-", "@"} or char in "\t\r\n\x00":
+            # Keep the prefix in the cell value, independent of CSV quoting.
+            return f"[text] {value}"
+        if not (char.isspace() or normalized in {"'", "\""} or category(char) in {"Cc", "Cf"}):
+            break
+    return value
+
+
+class SpreadsheetCsvWriter:
+    def __init__(self, output: io.StringIO):
+        self.writer = csv.writer(output, quoting=csv.QUOTE_ALL)
+
+    def writerow(self, values):
+        self.writer.writerow(spreadsheet_cell(value) for value in values)
 
 
 def detect_db_backend(database_value: str) -> str:
@@ -1951,13 +1974,13 @@ def create_app(test_config: dict | None = None) -> Flask:
             incident_severity_counts[severity_key] = incident_severity_counts.get(severity_key, 0) + 1
 
         updates_csv = io.StringIO(newline="")
-        updates_writer = csv.writer(updates_csv)
+        updates_writer = SpreadsheetCsvWriter(updates_csv)
         updates_writer.writerow(["created_at_utc", "message"])
         for update in updates:
             updates_writer.writerow([update["created_at"], update["message"]])
 
         incidents_csv = io.StringIO(newline="")
-        incidents_writer = csv.writer(incidents_csv)
+        incidents_writer = SpreadsheetCsvWriter(incidents_csv)
         incidents_writer.writerow(
             [
                 "incident_id",
@@ -2059,7 +2082,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         )
 
         action_queue_csv = io.StringIO(newline="")
-        action_queue_writer = csv.writer(action_queue_csv)
+        action_queue_writer = SpreadsheetCsvWriter(action_queue_csv)
         action_queue_writer.writerow(
             ["priority", "category", "site_name", "owner", "created_at_utc", "details"]
         )
@@ -2076,7 +2099,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
 
         patrol_alerts_csv = io.StringIO(newline="")
-        patrol_alerts_writer = csv.writer(patrol_alerts_csv)
+        patrol_alerts_writer = SpreadsheetCsvWriter(patrol_alerts_csv)
         patrol_alerts_writer.writerow(
             [
                 "assignment_id",
@@ -2104,7 +2127,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
 
         incidents_csv = io.StringIO(newline="")
-        incidents_writer = csv.writer(incidents_csv)
+        incidents_writer = SpreadsheetCsvWriter(incidents_csv)
         incidents_writer.writerow(
             [
                 "incident_id",
@@ -2144,7 +2167,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
 
         incident_sla_csv = io.StringIO(newline="")
-        incident_sla_writer = csv.writer(incident_sla_csv)
+        incident_sla_writer = SpreadsheetCsvWriter(incident_sla_csv)
         incident_sla_writer.writerow(
             [
                 "incident_id",
@@ -2182,7 +2205,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
 
         guard_activity_csv = io.StringIO(newline="")
-        guard_activity_writer = csv.writer(guard_activity_csv)
+        guard_activity_writer = SpreadsheetCsvWriter(guard_activity_csv)
         guard_activity_writer.writerow(
             [
                 "guard_name",
@@ -2256,7 +2279,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         )
 
         coverage_csv = io.StringIO(newline="")
-        coverage_writer = csv.writer(coverage_csv)
+        coverage_writer = SpreadsheetCsvWriter(coverage_csv)
         coverage_writer.writerow(
             [
                 "assignment_id",
@@ -2284,7 +2307,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
 
         incident_followups_csv = io.StringIO(newline="")
-        incident_followups_writer = csv.writer(incident_followups_csv)
+        incident_followups_writer = SpreadsheetCsvWriter(incident_followups_csv)
         incident_followups_writer.writerow(
             [
                 "incident_id",
@@ -2316,7 +2339,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
 
         patrol_followups_csv = io.StringIO(newline="")
-        patrol_followups_writer = csv.writer(patrol_followups_csv)
+        patrol_followups_writer = SpreadsheetCsvWriter(patrol_followups_csv)
         patrol_followups_writer.writerow(
             [
                 "assignment_id",
@@ -2342,7 +2365,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             )
 
         internal_updates_csv = io.StringIO(newline="")
-        internal_updates_writer = csv.writer(internal_updates_csv)
+        internal_updates_writer = SpreadsheetCsvWriter(internal_updates_csv)
         internal_updates_writer.writerow(
             ["created_at_utc", "site_name", "author_name", "message"]
         )
