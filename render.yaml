@@ -4,6 +4,7 @@ services:
     env: docker
     plan: starter
     autoDeploy: true
+    healthCheckPath: /ready
     envVars:
       - key: APP_SECRET
         generateValue: true
