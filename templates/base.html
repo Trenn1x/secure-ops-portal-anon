@@ -295,6 +295,7 @@
               {{ g.user.full_name }} · {{ g.user.role }}
             </div>
             <form method="post" action="{{ url_for('logout') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button type="submit" class="btn-primary px-3.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-ops-ink/30">
                 Sign out
               </button>
@@ -347,7 +348,7 @@
       })();
 
       (() => {
-        const forms = Array.from(document.querySelectorAll("form"));
+        const forms = Array.from(document.querySelectorAll("form:not([data-checkin-queue]):not([data-receipt-ack])"));
         forms.forEach((form) => {
           form.addEventListener("submit", () => {
             const submit = form.querySelector("button[type='submit']");

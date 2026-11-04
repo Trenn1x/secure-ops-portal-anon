@@ -35,6 +35,8 @@
   <nav class="quick-nav reveal reveal-delay-1">
     <a href="#ops-brief" class="quick-link">Ops Brief</a>
     <a href="#shift-handoff" class="quick-link">Shift Handoff</a>
+    <a href="#checkin-receipts" class="quick-link">Check-In Receipts</a>
+    <a href="#checkin-review-queue" class="quick-link">Late Check-In Review</a>
     <a href="#patrol-alerts" class="quick-link">Patrol Alerts</a>
     <a href="#shift-builder" class="quick-link">Create Shift</a>
     <a href="#incident-queue" class="quick-link">Incident Queue</a>
@@ -205,6 +207,48 @@
     </div>
   </article>
 
+  <article id="checkin-receipts" class="panel reveal p-5"
+           data-receipts-url="{{ url_for('checkin_receipts', include_review=1) }}">
+    <h2 class="section-title">Check-In Receipts</h2>
+    <p class="section-subtitle">Latest 30 received check-ins. A sync is late when receipt is at least {{ late_sync_minutes }} min after device capture. All times are UTC.</p>
+    <label id="checkin-receipt-filter" class="mt-3 text-sm font-semibold text-slate-700" hidden>
+      <input id="checkin-late-only" type="checkbox"> Late check-ins only
+    </label>
+    <p id="checkin-receipt-action-status" class="mt-2 text-sm text-slate-700" role="status"></p>
+    <p id="checkin-receipt-live-status" class="mt-2 text-sm text-slate-600" role="status" hidden></p>
+    <div class="table-shell">
+      <table class="min-w-full text-left text-sm">
+        {% include "_checkin_receipt_columns.html" %}
+        <tbody id="checkin-receipt-rows">
+          {% include "_checkin_receipt_rows.html" %}
+        </tbody>
+        <tbody id="checkin-no-late-receipts" hidden>
+          <tr><td colspan="6" class="px-3 py-3 text-slate-500">No late check-ins in the latest 30 receipts.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <section id="checkin-review-queue" class="mt-6 border-t border-slate-200 pt-5" aria-labelledby="checkin-review-heading">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h3 id="checkin-review-heading" class="section-title" tabindex="-1">Late Check-In Review Queue</h3>
+        <p id="checkin-pending-review-count" class="status-pill border-amber-200 bg-amber-50 text-amber-800"
+           role="status">{{ pending_review_count }} awaiting acknowledgement</p>
+      </div>
+      <p class="section-subtitle">Shows the oldest 30 awaiting review, including check-ins outside the recent receipts list.</p>
+      <div class="table-shell">
+        <table class="min-w-full text-left text-sm" aria-labelledby="checkin-review-heading">
+          {% include "_checkin_receipt_columns.html" %}
+          <tbody id="checkin-review-rows">
+            {% with received_checkins=review_checkins, review_queue=true %}
+              {% include "_checkin_receipt_rows.html" %}
+            {% endwith %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </article>
+
+  <script defer src="{{ url_for('static', filename='checkin-receipts.js') }}"></script>
+
   <article id="patrol-alerts" class="panel reveal p-5">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <h2 class="section-title">Patrol Alert Board</h2>
@@ -228,6 +272,7 @@
           <p class="mt-1 text-sm font-semibold text-slate-800">Stale: {{ alert.stale_minutes }} minute(s)</p>
           {% if alert.needs_follow_up %}
           <form method="post" action="{{ url_for('acknowledge_patrol_alert', assignment_id=alert.assignment_id) }}" class="mt-2.5 flex flex-col gap-2 sm:flex-row">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="text" name="note" placeholder="Optional acknowledgement note" class="input-field">
             <button type="submit" class="btn-primary px-3.5 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ops-ink/30">Acknowledge</button>
           </form>
@@ -245,6 +290,7 @@
       <h2 class="section-title">Create Shift Assignment</h2>
       <p class="section-subtitle">Assign guard coverage to an existing or new site.</p>
       <form method="post" action="{{ url_for('create_assignment') }}" class="mt-3 space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label class="block text-sm font-semibold text-slate-700">Guard
           <select name="guard_user_id" required class="select-field">
             <option value="">Select guard</option>
@@ -280,6 +326,7 @@
       <h2 class="section-title">Post Update</h2>
       <p class="section-subtitle">Send structured internal or client-facing communications.</p>
       <form method="post" action="{{ url_for('post_update') }}" class="mt-3 space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label class="block text-sm font-semibold text-slate-700">Site
           <select name="site_id" required class="select-field">
             <option value="">Select site</option>
@@ -308,6 +355,7 @@
         <a href="{{ url_for('download_connecteam_template') }}" class="quick-link">Download Connecteam CSV Template</a>
       </div>
       <form method="post" action="{{ url_for('import_connecteam_csv') }}" enctype="multipart/form-data" class="mt-4 space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="file" name="csv_file" accept=".csv" required class="input-field border-dashed bg-slate-50/85">
         <button type="submit" class="btn-accent w-full focus:outline-none focus:ring-2 focus:ring-ops-gold/30">Import Shifts</button>
       </form>
@@ -400,6 +448,7 @@
         </div>
         <div class="space-y-2">
           <form method="post" action="{{ url_for('update_incident_status', incident_id=incident.id) }}" class="space-y-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <label class="block text-sm font-semibold text-slate-700">Status
               <select name="status" required class="select-field">
                 {% for status in statuses %}
@@ -418,6 +467,7 @@
           </form>
           {% if incident.ack_state != 'not_required' %}
           <form method="post" action="{{ url_for('acknowledge_incident', incident_id=incident.id) }}" class="space-y-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <label class="block text-sm font-semibold text-slate-700">Dispatcher acknowledgement note
               <input type="text" name="note" placeholder="Optional ack note" class="input-field">
             </label>

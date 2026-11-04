@@ -56,7 +56,11 @@
     <article id="checkin-form" class="panel reveal p-5">
       <h2 class="section-title">Log Check-In</h2>
       <p class="section-subtitle">Capture patrol milestones to keep dispatch visibility current.</p>
-      <form method="post" action="{{ url_for('guard_checkin') }}" class="mt-3 space-y-3">
+      <form method="post" action="{{ url_for('guard_checkin') }}"
+            data-checkin-queue data-guard-id="{{ g.user.id }}"
+            data-session-url="{{ url_for('checkin_sync_session') }}"
+            data-sync-url="{{ url_for('sync_checkin') }}" class="mt-3 space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label class="block text-sm font-semibold text-slate-700">Assignment
           <select name="assignment_id" required class="select-field">
             <option value="">Select assignment</option>
@@ -73,16 +77,31 @@
           </select>
         </label>
         <label class="block text-sm font-semibold text-slate-700">Note
-          <input type="text" name="note" placeholder="Optional patrol note" class="input-field">
+          <input type="text" name="note" maxlength="2000" placeholder="Optional patrol note" class="input-field">
         </label>
         <button type="submit" class="btn-primary w-full focus:outline-none focus:ring-2 focus:ring-ops-ink/30">Submit Check-In</button>
       </form>
+      <div id="checkin-queue" class="mt-3 space-y-2" hidden>
+        <p id="checkin-sync-status" class="text-sm text-slate-700" role="status"></p>
+        <ul id="checkin-sync-errors" class="space-y-2 text-sm text-rose-800"></ul>
+        <button id="checkin-sync-now" type="button" class="btn-secondary">Sync now</button>
+        <div id="checkin-offline-settings" hidden>
+          <p class="text-sm text-slate-700">On a trusted device, save your assignment list for reopening the check-in page without a connection.</p>
+          <button id="checkin-offline-enable" type="button" class="btn-secondary"
+                  data-worker-url="{{ url_for('checkin_worker') }}">Enable or refresh offline access</button>
+          <button id="checkin-offline-disable" type="button" class="btn-secondary">Remove offline access</button>
+          <a id="checkin-offline-link" href="{{ url_for('offline_checkins') }}" class="quick-link" hidden>Open or bookmark offline check-ins</a>
+          <p id="checkin-offline-status" class="text-sm text-slate-700" role="status"></p>
+        </div>
+      </div>
+      <script defer src="{{ url_for('static', filename='checkin-queue.js') }}"></script>
     </article>
 
     <article id="incident-form" class="panel reveal reveal-delay-1 p-5">
       <h2 class="section-title">Report Incident</h2>
       <p class="section-subtitle">Send clear details to dispatch and choose client visibility.</p>
       <form method="post" action="{{ url_for('create_incident') }}" class="mt-3 space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label class="block text-sm font-semibold text-slate-700">Assignment
           <select name="assignment_id" required class="select-field">
             <option value="">Select assignment</option>

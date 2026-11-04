@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Tests and container smoke check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Run tests
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pytest -q
+          for script in static/*.js; do
+            node --check "$script"
+          done
+      - name: Build production image
+        run: docker build --tag omega-guard-ops:ci .
+      - name: Check production startup
+        shell: bash
+        run: |
+          APP_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+          export APP_SECRET
+          container="$(docker run --detach --env APP_SECRET --publish 127.0.0.1::8000 omega-guard-ops:ci)"
+          trap 'docker rm --force "$container" >/dev/null' EXIT
+          address="$(docker port "$container" 8000/tcp)"
+          if ! curl --fail --silent --show-error --max-time 3 \
+            --retry 10 --retry-all-errors --retry-delay 1 "http://$address/health"; then
+            docker logs "$container"
+            exit 1
+          fi
