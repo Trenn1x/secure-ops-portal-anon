@@ -88,7 +88,9 @@ The integration tests use temporary SQLite databases and cover:
 - incident acknowledgement and SLA escalation
 - shift-handoff packages
 
-GitHub Actions runs the suite, checks JavaScript syntax, and builds and starts the Docker image on pull requests and pushes to `main`.
+GitHub Actions runs the suite, checks JavaScript syntax, and builds and starts the Docker image on pull requests and pushes to `main`. The same check runs an end-to-end smoke test against a disposable PostgreSQL 16 service. It covers schema startup, sign-in, check-in retries, and dispatcher acknowledgement.
+
+To run the PostgreSQL smoke test locally, set `OMEGA_TEST_POSTGRES_URL` to a fresh disposable database and run `pytest -q tests/test_app.py::test_postgres_checkin_workflow_smoke`.
 
 ## Import behavior
 
