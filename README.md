@@ -111,6 +111,8 @@ When an external shift ID is supplied, re-importing updates the scheduled record
 - Shift handoff: coverage window, incident follow-ups, patrol follow-ups, and internal updates
 - Connecteam-compatible shift template
 
+Report CSVs prefix cells that spreadsheets may interpret as formulas with `[text] `. The prefix appears only in the exported file.
+
 ## Offline guard check-ins
 
 On HTTPS or localhost, sign in as a guard to load your assignments. The check-in form saves entries in this browser before attempting to sync. On a trusted device, use **Enable or refresh offline access** to save the current assignments and bookmark **Open or bookmark offline check-ins**. Refresh the saved list after assignments change.
