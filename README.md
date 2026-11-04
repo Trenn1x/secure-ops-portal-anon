@@ -178,6 +178,8 @@ Use `--dry-run` before a real migration.
 - `vercel.json`
 - `.env.example`
 
+Fly.io and Render use `/ready` to decide when web instances can receive traffic. A database outage makes the probe fail. Fly routes around the affected Machines, and Render can restart an instance if the failure persists. The Vercel Python Functions target exposes `/ready` as an HTTP endpoint for monitoring.
+
 For durable production data, use managed Postgres. A Vercel `/tmp` SQLite database is suitable only for a disposable demo.
 
 ## Scope and security notes
