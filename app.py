@@ -6,10 +6,12 @@ import re
 import secrets
 import sqlite3
 import zipfile
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from hashlib import sha256
 from hmac import digest as hmac_digest
+from pathlib import Path
 from time import time
 from unicodedata import category, normalize
 from uuid import UUID
@@ -248,6 +250,25 @@ def open_raw_connection(database_value: str, backend: str):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def database_is_ready(database_value: str, backend: str) -> bool:
+    if backend == "postgres":
+        import psycopg
+
+        try:
+            with psycopg.connect(database_value, connect_timeout=2, autocommit=True) as conn:
+                conn.execute("SELECT 1").fetchone()
+        except psycopg.Error:
+            return False
+    else:
+        database_uri = f"{Path(database_value).absolute().as_uri()}?mode=ro"
+        try:
+            with closing(sqlite3.connect(database_uri, uri=True, timeout=1)) as conn:
+                conn.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+        except sqlite3.Error:
+            return False
+    return True
 
 
 def init_db(database_value: str, backend: str) -> None:
@@ -1493,6 +1514,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     def load_logged_in_user() -> None:
         g.user = None
         g.auth_session_digest = None
+        if request.endpoint in {"health", "readiness"}:
+            return
         token = session.get("auth_token")
         if not token:
             if "user_id" in session:
@@ -1538,6 +1561,16 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.get("/health")
     def health() -> tuple[dict[str, str], int]:
         return {"status": "ok", "service": "omega-guard-ops-portal"}, 200
+
+    @app.get("/ready")
+    def readiness():
+        ready = database_is_ready(app.config["DATABASE"], app.config["DB_BACKEND"])
+        response = make_response(
+            {"status": "ready"} if ready else {"status": "database_unavailable"},
+            200 if ready else 503,
+        )
+        response.cache_control.no_store = True
+        return response
 
     def reserve_login_attempts(username: str):
         buckets = []

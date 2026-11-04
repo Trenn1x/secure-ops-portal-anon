@@ -135,6 +135,8 @@ gunicorn --bind 0.0.0.0:${PORT} app:app
 
 Serve the portal over HTTPS. Gunicorn can listen over HTTP behind a TLS-terminating reverse proxy. Production session cookies use Secure, HttpOnly, and SameSite=Lax. The direct loopback launcher supports local HTTP.
 
+Use `GET /ready` to check database readiness. It returns HTTP 200 when the configured database answers the probe and HTTP 503 when it cannot be reached. PostgreSQL connection attempts use a two-second timeout per host. `GET /health` checks process liveness independently of the database.
+
 Sessions expire on the server 12 hours after sign-in by default. Set `APP_SESSION_HOURS` to a whole number from 1 to 24 for new sessions. Signing out revokes that session on the server. When upgrading from older versions, users must sign in again. Queued offline check-ins stay on the device and sync once the same guard signs in.
 
 Sign-in allows ten failed attempts per username in a five-minute window shared across workers. A correct sign-in releases its own attempt slot. An operator password reset clears the username limit, and existing sessions can continue during throttling. For direct deployments, `APP_LOGIN_SOURCE_LIMIT` can also cap attempts per address over five minutes. The default is `0` because reverse proxies and shared networks can group many users under one address. Configure source-based limits at a trusted reverse proxy when it identifies client addresses. The app ignores forwarded addresses.
