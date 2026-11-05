@@ -424,6 +424,7 @@
           <h3 class="font-semibold text-slate-900">#{{ incident.id }} {{ incident.title }}</h3>
           <p class="mt-0.5 text-sm text-slate-600">{{ incident.site_name }} · reported by {{ incident.guard_name }}</p>
           <p class="text-xs text-slate-500">{{ incident.created_at }}</p>
+          <p class="mt-2 text-sm text-slate-700" style="white-space: pre-wrap; overflow-wrap: anywhere;">{{ incident.details }}</p>
           <div class="mt-2 flex flex-wrap items-center gap-2">
             {{ pill(incident.severity) }}
             {{ pill(incident.status) }}

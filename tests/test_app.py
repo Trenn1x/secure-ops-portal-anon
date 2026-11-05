@@ -671,6 +671,68 @@ def test_guard_can_submit_incident(client):
     assert b"Incident submitted to dispatch" in response.data
 
 
+def test_incident_narrative_stays_internal_until_dispatch_shares_it(client):
+    web, db_path = client
+    guard_page = login(web, "guard.alpha", "ops123!")
+    severity = re.search(rb'<select name="severity"[^>]*>(.*?)</select>', guard_page.data, re.S)
+    assert severity is not None
+    first_option = re.search(rb"<option\b[^>]*>", severity.group(1))
+    assert first_option is not None and b'value=""' in first_option.group(0)
+    sharing = re.search(rb'<input\b[^>]*name="client_visible"[^>]*>', guard_page.data)
+    assert sharing is not None and b"checked" not in sharing.group(0)
+
+    title = "Phone triage narrative regression"
+    details = "North gate remained open.\n" + "LatchDevice" * 30 + "\n<script>alert(2468)</script>"
+    escaped_details = details.replace("<", "&lt;").replace(">", "&gt;").encode()
+    with sqlite3.connect(db_path) as conn:
+        assignment_id = conn.execute(
+            """
+            SELECT id FROM assignments
+            WHERE guard_user_id = (SELECT id FROM users WHERE username = 'guard.alpha')
+            ORDER BY id LIMIT 1
+            """
+        ).fetchone()[0]
+
+    submitted = post_form(
+        web, "/guard/incidents",
+        data={
+            "assignment_id": str(assignment_id),
+            "title": title,
+            "details": details,
+            "severity": "medium",
+        },
+        follow_redirects=True,
+    )
+    assert submitted.status_code == 200
+    with sqlite3.connect(db_path) as conn:
+        incident_id, visible = conn.execute(
+            "SELECT id, client_visible FROM incidents WHERE title = ?", (title,)
+        ).fetchone()
+    assert visible == 0
+
+    post_form(web, "/logout")
+    hidden = login(web, "client.portal", "ops123!")
+    assert title.encode() not in hidden.data
+    assert b"North gate remained open." not in hidden.data
+
+    post_form(web, "/logout")
+    dispatch_page = login(web, "dispatcher", "ops123!")
+    assert escaped_details in dispatch_page.data
+    assert b"<script>alert(2468)</script>" not in dispatch_page.data
+    published = post_form(
+        web, f"/dispatcher/incidents/{incident_id}/status",
+        data={"status": "in_review", "client_visible": "on"},
+        follow_redirects=True,
+    )
+    assert published.status_code == 200
+
+    post_form(web, "/logout")
+    client_page = login(web, "client.portal", "ops123!")
+    assert title.encode() in client_page.data
+    assert escaped_details in client_page.data
+    assert b"<script>alert(2468)</script>" not in client_page.data
+
+
 def test_dispatcher_can_import_connecteam_csv(client):
     web, _ = client
     login(web, "dispatcher", "ops123!")
