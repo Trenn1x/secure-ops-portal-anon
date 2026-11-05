@@ -107,6 +107,7 @@
       .table-shell {
         margin-top: 0.75rem;
         overflow-x: auto;
+        overflow-wrap: normal;
         border-radius: 0.92rem;
         border: 1px solid rgba(226, 232, 240, 0.9);
         background: rgba(255, 255, 255, 0.84);
@@ -276,6 +277,11 @@
         .btn-primary, .btn-secondary, .btn-accent, .quick-link,
         label:has(input[type="checkbox"]) {
           min-height: 44px;
+        }
+        label:has(input[type="checkbox"]) {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
         }
         [id] { scroll-margin-top: 1rem; }
       }
