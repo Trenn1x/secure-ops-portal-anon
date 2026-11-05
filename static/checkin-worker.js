@@ -1,9 +1,13 @@
-const cacheName = "omega-offline-checkins-v1";
+const cacheName = "omega-offline-checkins-v2";
 const offlinePage = "/guard/checkins/offline";
 const assets = [offlinePage, "/static/checkin-queue.js"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(cacheName).then((cache) => cache.addAll(assets)));
+  event.waitUntil((async () => {
+    const cache = await caches.open(cacheName);
+    await cache.addAll(assets.map((url) => new Request(url, { cache: "reload" })));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {

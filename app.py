@@ -1724,6 +1724,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 SELECT i.id,
                        i.site_id,
                        i.title,
+                       i.details,
                        i.severity,
                        i.status,
                        i.client_visible,
